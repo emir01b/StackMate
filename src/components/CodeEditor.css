@@ -1,0 +1,56 @@
+.code-editor-container {
+  height: 100%;
+  background-color: #1e1e1e;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.editor-wrapper {
+  flex: 1;
+  overflow: hidden;
+}
+
+.editor-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #858585;
+}
+
+.placeholder-content { text-align: center; }
+.placeholder-title { font-size: 16px; margin-bottom: 8px; }
+.placeholder-subtitle { font-size: 13px; }
+
+/* Kaydet toast mesajı */
+.save-toast {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 100;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.save-toast.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.save-toast.success {
+  background-color: #1e4d2b;
+  color: #4ec9b0;
+  border: 1px solid #4ec9b0;
+}
+
+.save-toast.error {
+  background-color: #4d1e1e;
+  color: #f48771;
+  border: 1px solid #f48771;
+}

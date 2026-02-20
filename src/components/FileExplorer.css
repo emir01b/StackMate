@@ -1,0 +1,66 @@
+.file-explorer-container {
+  height: 100%;
+  background-color: #252526;
+  color: #cccccc;
+  overflow-y: auto;
+}
+
+.file-explorer-header {
+  padding: 12px;
+  border-bottom: 1px solid #3e3e42;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: #cccccc;
+}
+
+.file-tree-node {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background-color 0.1s;
+}
+
+.file-tree-node:hover {
+  background-color: #2a2d2e;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.chevron {
+  margin-right: 4px;
+}
+
+.icon-spacer {
+  width: 16px;
+  margin-right: 4px;
+}
+
+.folder-icon {
+  margin-right: 8px;
+  color: #dcb67a;
+}
+
+.file-icon {
+  margin-right: 8px;
+  color: #858585;
+}
+
+.node-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-empty {
+  padding: 16px;
+  color: #858585;
+  font-size: 13px;
+  line-height: 1.8;
+}
