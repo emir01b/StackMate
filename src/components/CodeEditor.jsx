@@ -39,19 +39,38 @@ const CodeEditor = ({ file, onSave }) => {
     const editor = editorRef.current;
     if (!editor) return;
 
-    if (!file?.handle) {
-      showToast('✗ Kaydetme için dosyanın diske bağlı olması gerekir', true);
-      return;
-    }
-    try {
-      const content = editor.getValue();
-      const writable = await file.handle.createWritable();
-      await writable.write(content);
-      await writable.close();
-      onSave?.(content);
-      showToast('✓ Kaydedildi');
-    } catch (err) {
-      showToast('✗ ' + err.message, true);
+    const content = editor.getValue();
+
+    if (file?.handle) {
+      // Native FS — doğrudan diske yaz
+      try {
+        const writable = await file.handle.createWritable();
+        await writable.write(content);
+        await writable.close();
+        onSave?.(content);
+        showToast('✓ Kaydedildi');
+      } catch (err) {
+        showToast('✗ ' + err.message, true);
+      }
+    } else if (file) {
+      // Fallback — dosyayı indir
+      try {
+        const blob = new Blob([content], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name || 'untitled.txt';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        onSave?.(content);
+        showToast('✓ İndirildi (tarayıcı kısıtlaması)');
+      } catch (err) {
+        showToast('✗ ' + err.message, true);
+      }
+    } else {
+      showToast('✗ Kaydedilecek açık dosya yok', true);
     }
   }, [file, onSave]);
 

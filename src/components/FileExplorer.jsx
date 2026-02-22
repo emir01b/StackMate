@@ -16,6 +16,7 @@ const FileExplorer = ({ onFileSelect, customFiles }) => {
   }, [customFiles]);
 
   const loadFolderContents = async (node, path) => {
+    // Handle yoksa (fallback mod) veya children zaten varsa atla
     if (!node.handle || node.children.length > 0) return;
     try {
       const entries = [];
@@ -72,10 +73,20 @@ const FileExplorer = ({ onFileSelect, customFiles }) => {
     if (node.type === 'folder') return;
 
     if (node.handle) {
+      // Native FS — File System Access API
       try {
         const file = await node.handle.getFile();
         const content = await file.text();
         onFileSelect({ name: node.name, content, handle: node.handle });
+      } catch (err) {
+        console.error('Dosya okunamadı:', err.message);
+        alert('Dosya okunamadı: ' + err.message);
+      }
+    } else if (node._file) {
+      // Fallback — <input webkitdirectory> ile gelen File nesnesi
+      try {
+        const content = await node._file.text();
+        onFileSelect({ name: node.name, content, handle: null, _file: node._file });
       } catch (err) {
         console.error('Dosya okunamadı:', err.message);
         alert('Dosya okunamadı: ' + err.message);

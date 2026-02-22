@@ -16,6 +16,57 @@ import {
 } from './utils/storage';
 import './App.css';
 
+// File System Access API desteği kontrol
+const hasNativeFS = 'showDirectoryPicker' in window;
+
+// Fallback: Düz dosya listesinden ağaç yapısı oluştur
+const buildTreeFromFileList = (fileList) => {
+  const rootName = fileList[0]?.webkitRelativePath?.split('/')[0] || 'Proje';
+  const root = { name: rootName, type: 'folder', children: [], handle: null };
+
+  for (const file of fileList) {
+    const parts = file.webkitRelativePath.split('/');
+    let current = root;
+
+    for (let i = 1; i < parts.length; i++) {
+      const partName = parts[i];
+      const isLastPart = i === parts.length - 1;
+
+      if (isLastPart) {
+        // Dosya
+        current.children.push({
+          name: partName,
+          type: 'file',
+          handle: null,
+          content: null,
+          _file: file, // Orijinal File nesnesi (lazy read için)
+        });
+      } else {
+        // Klasör
+        let folder = current.children.find(c => c.name === partName && c.type === 'folder');
+        if (!folder) {
+          folder = { name: partName, type: 'folder', children: [], handle: null };
+          current.children.push(folder);
+        }
+        current = folder;
+      }
+    }
+  }
+
+  // Sırala: klasörler önce, sonra dosyalar (alfabetik)
+  const sortTree = (node) => {
+    if (node.children) {
+      node.children.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      node.children.forEach(sortTree);
+    }
+  };
+  sortTree(root);
+  return root;
+};
+
 // Klasör içeriğini oku (sadece ilk seviye, lazy load için)
 const readDirectory = async (dirHandle) => {
   const entries = [];
@@ -207,54 +258,78 @@ function App() {
   };
 
   // ─── FILE / VIEW ACTION ────────────────────────────────────────────────────
+  // Gizli input referansları (fallback için)
+  const folderInputRef = useRef(null);
+  const fileInputRef = useRef(null);
+
   const handleFileAction = async (action) => {
     switch (action) {
       case 'open-folder': {
-        if (!('showDirectoryPicker' in window)) {
-          alert('Chrome veya Edge kullanın (File System Access API gerekli).');
-          return;
-        }
-        try {
-          const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-          const structure = await readDirectory(dirHandle);
-          setFiles(structure);
-          setCurrentDirHandle(dirHandle);
-          await saveDirectoryHandle(dirHandle);
-        } catch (err) {
-          if (err.name !== 'AbortError') alert('Klasör açılamadı: ' + err.message);
+        if (hasNativeFS) {
+          // Chrome / Edge — File System Access API
+          try {
+            const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+            const structure = await readDirectory(dirHandle);
+            setFiles(structure);
+            setCurrentDirHandle(dirHandle);
+            await saveDirectoryHandle(dirHandle);
+          } catch (err) {
+            if (err.name !== 'AbortError') alert('Klasör açılamadı: ' + err.message);
+          }
+        } else {
+          // Brave / Firefox / Safari — <input webkitdirectory> fallback
+          folderInputRef.current?.click();
         }
         break;
       }
       case 'open-file': {
-        if (!('showOpenFilePicker' in window)) {
-          alert('Chrome veya Edge kullanın.');
-          return;
-        }
-        try {
-          const [fh] = await window.showOpenFilePicker();
-          const f = await fh.getFile();
-          const content = await f.text();
-          await openFileInTab({ name: f.name, content, handle: fh });
-        } catch (err) {
-          if (err.name !== 'AbortError') alert('Dosya açılamadı: ' + err.message);
+        if (hasNativeFS) {
+          try {
+            const [fh] = await window.showOpenFilePicker();
+            const f = await fh.getFile();
+            const content = await f.text();
+            await openFileInTab({ name: f.name, content, handle: fh });
+          } catch (err) {
+            if (err.name !== 'AbortError') alert('Dosya açılamadı: ' + err.message);
+          }
+        } else {
+          // Fallback: normal <input type="file">
+          fileInputRef.current?.click();
         }
         break;
       }
       case 'save-file': {
         const current = activeFileRef.current;
-        if (!current?.handle) {
+        if (!current) {
           alert('Kaydedilecek açık dosya yok.');
           return;
         }
-        try {
-          // Monaco editör Ctrl+S ile zaten kendi içinde kaydeder
-          // Burası File menüsünden kaydet için fallback
-          const writable = await current.handle.createWritable();
-          await writable.write(current.content || '');
-          await writable.close();
-          handleSave(current.content || '');
-        } catch (err) {
-          alert('Kaydetme hatası: ' + err.message);
+        if (current.handle) {
+          // Native FS — doğrudan kaydet
+          try {
+            const writable = await current.handle.createWritable();
+            await writable.write(current.content || '');
+            await writable.close();
+            handleSave(current.content || '');
+          } catch (err) {
+            alert('Kaydetme hatası: ' + err.message);
+          }
+        } else {
+          // Fallback: dosyayı indir
+          try {
+            const blob = new Blob([current.content || ''], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = current.name || 'untitled.txt';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            handleSave(current.content || '');
+          } catch (err) {
+            alert('İndirme hatası: ' + err.message);
+          }
         }
         break;
       }
@@ -270,6 +345,28 @@ function App() {
       default:
         break;
     }
+  };
+
+  // Fallback: klasör input değişikliği
+  const handleFolderInputChange = (e) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const tree = buildTreeFromFileList(Array.from(fileList));
+    setFiles(tree);
+    setCurrentDirHandle(null);
+    // Input'u sıfırla (aynı klasör tekrar seçilebilsin)
+    e.target.value = '';
+  };
+
+  // Fallback: dosya input değişikliği
+  const handleFileInputChange = async (e) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const file = fileList[0];
+    const content = await file.text();
+    await openFileInTab({ name: file.name, content, handle: null, _file: file });
+    // Input'u sıfırla
+    e.target.value = '';
   };
 
   const handleViewAction = async (action) => {
@@ -301,11 +398,28 @@ function App() {
     <div className="app-root">
       <Navbar onFileAction={handleFileAction} onViewAction={handleViewAction} />
 
+      {/* Gizli fallback input'lar — tüm tarayıcılar için */}
+      <input
+        ref={folderInputRef}
+        type="file"
+        webkitdirectory="true"
+        directory="true"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFolderInputChange}
+      />
+      <input
+        ref={fileInputRef}
+        type="file"
+        style={{ display: 'none' }}
+        onChange={handleFileInputChange}
+      />
+
       <div className="app-main">
         <div className="app-container">
           {showExplorer && (
             <>
-              <div 
+              <div
                 ref={explorerRef}
                 className="file-explorer"
                 style={{ width: explorerWidth ? `${explorerWidth}px` : undefined }}
@@ -345,7 +459,7 @@ function App() {
                 onResizeStart={getAIResizeStart}
                 onResize={handleAIResize}
               />
-              <div 
+              <div
                 ref={aiRef}
                 className="ai-panel"
                 style={{ width: aiWidth ? `${aiWidth}px` : undefined }}
@@ -363,7 +477,7 @@ function App() {
               onResizeStart={getTerminalResizeStart}
               onResize={handleTerminalResize}
             />
-            <div 
+            <div
               ref={terminalRef}
               className="terminal-panel"
               style={{ height: terminalHeight ? `${terminalHeight}px` : undefined }}
@@ -378,7 +492,7 @@ function App() {
           </>
         )}
       </div>
-      </div>
+    </div>
   );
 }
 
