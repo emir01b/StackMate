@@ -6,12 +6,44 @@
 }
 
 .file-explorer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 12px;
   border-bottom: 1px solid #3e3e42;
   font-weight: 600;
   font-size: 11px;
   letter-spacing: 0.5px;
   color: #cccccc;
+}
+
+.explorer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.explorer-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: #858585;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+.explorer-action-btn:hover {
+  color: #cccccc;
+  background-color: #3e3e42;
+}
+
+.explorer-action-btn.delete-btn:hover {
+  color: #f48771;
+  background-color: #4d1e1e;
 }
 
 .file-tree-node {
@@ -25,6 +57,11 @@
 
 .file-tree-node:hover {
   background-color: #2a2d2e;
+}
+
+.file-tree-node.selected {
+  background-color: #094771;
+  color: #ffffff;
 }
 
 .icon {

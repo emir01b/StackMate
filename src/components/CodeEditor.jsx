@@ -1,5 +1,7 @@
 import React, { useRef, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
+import { Save } from 'lucide-react';
+import { apiSaveFile } from '../utils/fileApi';
 import './CodeEditor.css';
 
 const LANGUAGE_MAP = {
@@ -21,9 +23,10 @@ const getLanguage = (filename) => {
 // Normalize: her zaman string döndür
 const safeContent = (v) => (typeof v === 'string' ? v : '');
 
-const CodeEditor = ({ file, onSave }) => {
+const CodeEditor = ({ file, onSave, onContentChange, currentDirPath }) => {
   const editorRef = useRef(null);
   const saveToastRef = useRef(null);
+  const contentChangeTimerRef = useRef(null);
 
   const showToast = (msg, isError = false) => {
     if (!saveToastRef.current) return;
@@ -52,8 +55,18 @@ const CodeEditor = ({ file, onSave }) => {
       } catch (err) {
         showToast('✗ ' + err.message, true);
       }
+    } else if (file && currentDirPath) {
+      // Backend API — sunucu üzerinden proje klasörüne kaydet
+      try {
+        const filePath = currentDirPath + '\\' + file.name;
+        await apiSaveFile(filePath, content);
+        onSave?.(content);
+        showToast('✓ Kaydedildi');
+      } catch (err) {
+        showToast('✗ ' + err.message, true);
+      }
     } else if (file) {
-      // Fallback — dosyayı indir
+      // Son çare — dosyayı indir
       try {
         const blob = new Blob([content], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
@@ -72,7 +85,7 @@ const CodeEditor = ({ file, onSave }) => {
     } else {
       showToast('✗ Kaydedilecek açık dosya yok', true);
     }
-  }, [file, onSave]);
+  }, [file, onSave, currentDirPath]);
 
   const handleMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -94,17 +107,35 @@ const CodeEditor = ({ file, onSave }) => {
     );
   }
 
+  // İçerik değiştiğinde üst bileşene bildir (debounced)
+  const handleEditorChange = useCallback((value) => {
+    if (contentChangeTimerRef.current) {
+      clearTimeout(contentChangeTimerRef.current);
+    }
+    contentChangeTimerRef.current = setTimeout(() => {
+      onContentChange?.(value);
+    }, 300);
+  }, [onContentChange]);
+
   return (
     <div className="code-editor-container">
       <div className="save-toast" ref={saveToastRef} />
+      <div className="editor-toolbar">
+        <span className="editor-filename">{file.name}</span>
+        <button className="editor-save-btn" onClick={doSave} title="Kaydet (Ctrl+S)">
+          <Save size={14} />
+          <span>Kaydet</span>
+        </button>
+      </div>
       <div className="editor-wrapper">
-        {/* key prop ile her yeni dosyada Monaco sıfırdan mount olur */}
+        {/* key: dosya adı + içerik uzunluğu — dışarıdan içerik değiştiğinde Monaco yeniden yüklenir */}
         <Editor
-          key={file.name}
+          key={file.name + '::' + (file.content?.length || 0)}
           height="100%"
           language={getLanguage(file.name)}
           defaultValue={safeContent(file.content)}
           onMount={handleMount}
+          onChange={handleEditorChange}
           theme="vs-dark"
           options={{
             fontSize: 14,

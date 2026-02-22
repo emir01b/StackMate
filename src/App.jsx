@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Navbar from './components/Navbar';
 import FileExplorer from './components/FileExplorer';
 import CodeEditor from './components/CodeEditor';
@@ -14,10 +14,8 @@ import {
   saveTerminalState, loadTerminalState,
   savePanelSizes, loadPanelSizes,
 } from './utils/storage';
+import { apiReadDir, apiSaveFile, apiReadFile, apiRename, apiDelete } from './utils/fileApi';
 import './App.css';
-
-// File System Access API desteği kontrol
-const hasNativeFS = 'showDirectoryPicker' in window;
 
 // Fallback: Düz dosya listesinden ağaç yapısı oluştur
 const buildTreeFromFileList = (fileList) => {
@@ -88,6 +86,7 @@ const readDirectory = async (dirHandle) => {
 function App() {
   const [files, setFiles] = useState(null);
   const [currentDirHandle, setCurrentDirHandle] = useState(null);
+  const [currentDirPath, setCurrentDirPath] = useState(null); // Backend API için sunucu yolu
 
   // Tab sistemi
   const [openTabs, setOpenTabs] = useState([]); // [{ name, content, handle, modified }]
@@ -216,6 +215,139 @@ function App() {
     ));
   };
 
+  // İçerik değiştiğinde tab'ı modified olarak işaretle
+  const handleContentChange = useCallback((newContent) => {
+    setOpenTabs(prev => prev.map(t =>
+      t.name === activeTab ? { ...t, content: newContent, modified: true } : t
+    ));
+  }, [activeTab]);
+
+  // Explorer'ı yenile + açık sekmelerin içeriklerini diskten tekrar oku
+  const refreshExplorer = useCallback(async () => {
+    // 1. Dosya ağacını yenile
+    if (currentDirHandle) {
+      try {
+        const structure = await readDirectory(currentDirHandle);
+        setFiles(structure);
+      } catch (err) {
+        console.error('Explorer yenilenemedi:', err.message);
+      }
+    } else if (currentDirPath) {
+      try {
+        const tree = await apiReadDir(currentDirPath, true);
+        setFiles(tree);
+      } catch (err) {
+        console.error('Explorer yenilenemedi:', err.message);
+      }
+    }
+
+    // 2. Açık sekmelerin içeriklerini diskten yenile
+    setOpenTabs(prevTabs => {
+      // Async güncelleme başlat
+      (async () => {
+        const updatedTabs = await Promise.all(
+          prevTabs.map(async (tab) => {
+            try {
+              if (tab.handle) {
+                // Native FS — handle ile oku
+                const f = await tab.handle.getFile();
+                const content = await f.text();
+                return { ...tab, content, modified: false };
+              } else if (currentDirPath) {
+                // Backend API — sunucudan oku
+                const result = await apiReadFile(currentDirPath + '\\' + tab.name);
+                return { ...tab, content: result.content, modified: false };
+              }
+            } catch (_) {
+              // Dosya silinmiş/erişilemiyor — mevcut içeriği koru
+            }
+            return tab;
+          })
+        );
+        setOpenTabs(updatedTabs);
+      })();
+      return prevTabs;
+    });
+  }, [currentDirHandle, currentDirPath]);
+
+  // Global Ctrl+S yakalama — tarayıcının kendi kaydet diyaloğunu engelle
+  useEffect(() => {
+    const handleGlobalSave = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalSave);
+    return () => window.removeEventListener('keydown', handleGlobalSave);
+  }, []);
+
+  // ─── DOSYA YENİDEN ADLANDIR ─────────────────────────────────────────
+  const handleRename = useCallback(async (node) => {
+    const newName = prompt('Yeni adı girin:', node.name);
+    if (!newName || !newName.trim() || newName.trim() === node.name) return;
+    const trimmed = newName.trim();
+
+    if (currentDirPath) {
+      try {
+        // node.path: "ProjeAdı/Alt/dosya.txt" gibi
+        // root kısmını kaldırıp tam yolu oluştur
+        const parts = node.path.split('/');
+        parts.shift(); // root klasör adını kaldır
+        const relativePath = parts.join('\\');
+        const oldFullPath = currentDirPath + '\\' + relativePath;
+
+        // Yeni tam yol: parent dizin + yeni ad
+        const parentParts = [...parts];
+        parentParts.pop();
+        const parentDir = parentParts.length > 0
+          ? currentDirPath + '\\' + parentParts.join('\\')
+          : currentDirPath;
+        const newFullPath = parentDir + '\\' + trimmed;
+
+        await apiRename(oldFullPath, newFullPath);
+
+        // Eğer açık bir sekmeyse tab adını da güncelle
+        setOpenTabs(prev => prev.map(t =>
+          t.name === node.name ? { ...t, name: trimmed } : t
+        ));
+        if (activeTab === node.name) {
+          setActiveTab(trimmed);
+        }
+
+        await refreshExplorer();
+      } catch (err) {
+        alert('Yeniden adlandırma hatası: ' + err.message);
+      }
+    }
+  }, [currentDirPath, activeTab, refreshExplorer]);
+
+  // ─── DOSYA SİL ─────────────────────────────────────────────────────
+  const handleDelete = useCallback(async (node) => {
+    const typeText = node.type === 'folder' ? 'klasörü' : 'dosyayı';
+    if (!confirm(`"${node.name}" ${typeText} silmek istediğinize emin misiniz?`)) return;
+
+    if (currentDirPath) {
+      try {
+        const parts = node.path.split('/');
+        parts.shift();
+        const relativePath = parts.join('\\');
+        const fullPath = currentDirPath + '\\' + relativePath;
+
+        await apiDelete(fullPath);
+
+        // Açık sekmeyse kapat
+        setOpenTabs(prev => prev.filter(t => t.name !== node.name));
+        if (activeTab === node.name) {
+          setActiveTab(null);
+        }
+
+        await refreshExplorer();
+      } catch (err) {
+        alert('Silme hatası: ' + err.message);
+      }
+    }
+  }, [currentDirPath, activeTab, refreshExplorer]);
+
   // ─── RESIZE HANDLERS ──────────────────────────────────────────────────────
   const explorerRef = useRef(null);
   const aiRef = useRef(null);
@@ -265,37 +397,41 @@ function App() {
   const handleFileAction = async (action) => {
     switch (action) {
       case 'open-folder': {
-        if (hasNativeFS) {
-          // Chrome / Edge — File System Access API
+        // Önce native API'yi dene (Chrome, Edge ve bazı Brave sürümleri)
+        if ('showDirectoryPicker' in window) {
           try {
             const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
             const structure = await readDirectory(dirHandle);
             setFiles(structure);
             setCurrentDirHandle(dirHandle);
             await saveDirectoryHandle(dirHandle);
+            break; // Başarılı — çık
           } catch (err) {
-            if (err.name !== 'AbortError') alert('Klasör açılamadı: ' + err.message);
+            if (err.name === 'AbortError') break; // Kullanıcı iptal etti
+            // API var ama çalışmıyor — fallback'e düş
+            console.warn('showDirectoryPicker başarısız, fallback kullanılıyor:', err.message);
           }
-        } else {
-          // Brave / Firefox / Safari — <input webkitdirectory> fallback
-          folderInputRef.current?.click();
         }
+        // Fallback: <input webkitdirectory>
+        folderInputRef.current?.click();
         break;
       }
       case 'open-file': {
-        if (hasNativeFS) {
+        // Önce native API'yi dene
+        if ('showOpenFilePicker' in window) {
           try {
             const [fh] = await window.showOpenFilePicker();
             const f = await fh.getFile();
             const content = await f.text();
             await openFileInTab({ name: f.name, content, handle: fh });
+            break; // Başarılı — çık
           } catch (err) {
-            if (err.name !== 'AbortError') alert('Dosya açılamadı: ' + err.message);
+            if (err.name === 'AbortError') break; // Kullanıcı iptal etti
+            console.warn('showOpenFilePicker başarısız, fallback kullanılıyor:', err.message);
           }
-        } else {
-          // Fallback: normal <input type="file">
-          fileInputRef.current?.click();
         }
+        // Fallback: normal <input type="file">
+        fileInputRef.current?.click();
         break;
       }
       case 'save-file': {
@@ -310,6 +446,15 @@ function App() {
             const writable = await current.handle.createWritable();
             await writable.write(current.content || '');
             await writable.close();
+            handleSave(current.content || '');
+          } catch (err) {
+            alert('Kaydetme hatası: ' + err.message);
+          }
+        } else if (currentDirPath) {
+          // Backend API — sunucu üzerinden proje klasörüne kaydet
+          try {
+            const filePath = currentDirPath + '\\' + current.name;
+            await apiSaveFile(filePath, current.content || '');
             handleSave(current.content || '');
           } catch (err) {
             alert('Kaydetme hatası: ' + err.message);
@@ -334,12 +479,40 @@ function App() {
         break;
       }
       case 'new-file': {
-        const name = 'untitled-' + Date.now() + '.txt';
-        const newTab = { name, content: '', handle: null, modified: false };
-        const newTabs = [...openTabs, newTab];
-        setOpenTabs(newTabs);
-        setActiveTab(name);
-        await saveActiveTab(name);
+        const fileName = prompt('Dosya adını girin:', 'yeni-dosya.txt');
+        if (!fileName || !fileName.trim()) break;
+        const trimmedName = fileName.trim();
+
+        if (currentDirHandle) {
+          // Native FS — proje klasörüne gerçek dosya oluştur
+          try {
+            const fileHandle = await currentDirHandle.getFileHandle(trimmedName, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write('');
+            await writable.close();
+            await refreshExplorer();
+            await openFileInTab({ name: trimmedName, content: '', handle: fileHandle });
+          } catch (err) {
+            alert('Dosya oluşturulamadı: ' + err.message);
+          }
+        } else if (currentDirPath) {
+          // Backend API — sunucu üzerinden dosya oluştur
+          try {
+            const filePath = currentDirPath + '\\' + trimmedName;
+            await apiSaveFile(filePath, '');
+            await refreshExplorer();
+            await openFileInTab({ name: trimmedName, content: '', handle: null });
+          } catch (err) {
+            alert('Dosya oluşturulamadı: ' + err.message);
+          }
+        } else {
+          // Hiç klasör açılmamış — basit tab aç
+          const newTab = { name: trimmedName, content: '', handle: null, modified: false };
+          const newTabs = [...openTabs, newTab];
+          setOpenTabs(newTabs);
+          setActiveTab(trimmedName);
+          await saveActiveTab(trimmedName);
+        }
         break;
       }
       default:
@@ -348,12 +521,41 @@ function App() {
   };
 
   // Fallback: klasör input değişikliği
-  const handleFolderInputChange = (e) => {
+  const handleFolderInputChange = async (e) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
-    const tree = buildTreeFromFileList(Array.from(fileList));
+    const fileArray = Array.from(fileList);
+    const tree = buildTreeFromFileList(fileArray);
     setFiles(tree);
     setCurrentDirHandle(null);
+
+    // Dosya yolundan proje klasör yolunu çıkar (Backend API için)
+    // webkitRelativePath: "SmartRamManager/dosya.txt" gibi
+    // Gerçek tam yolu bulmak için backend'e sorabiliriz
+    // Ama güvenlik nedeniyle tarayıcı tam yolu vermez.
+    // Kullanıcıya proje yolunu soralım (bir kere)
+    const rootName = fileArray[0]?.webkitRelativePath?.split('/')[0];
+    if (rootName) {
+      // Bilinen olası yolları dene
+      const possiblePaths = [
+        `C:\\Users\\${navigator.userAgent.includes('Windows') ? '' : ''}`,
+      ];
+      // En basit yaklaşım: kullanıcıya sor
+      const savedPath = localStorage.getItem('stackmate_project_path');
+      if (savedPath && savedPath.endsWith(rootName)) {
+        setCurrentDirPath(savedPath);
+      } else {
+        const userPath = prompt(
+          `Proje klasörünün tam yolunu girin (sessiz kaydetme için):\nÖrnek: C:\\Users\\kullanici\\Desktop\\proje\\${rootName}`,
+          `C:\\Users\\enesb\\Desktop\\proje\\${rootName}`
+        );
+        if (userPath && userPath.trim()) {
+          setCurrentDirPath(userPath.trim());
+          localStorage.setItem('stackmate_project_path', userPath.trim());
+        }
+      }
+    }
+
     // Input'u sıfırla (aynı klasör tekrar seçilebilsin)
     e.target.value = '';
   };
@@ -427,6 +629,10 @@ function App() {
                 <FileExplorer
                   onFileSelect={openFileInTab}
                   customFiles={files}
+                  onRefresh={refreshExplorer}
+                  onRename={handleRename}
+                  onDelete={handleDelete}
+                  currentDirPath={currentDirPath}
                 />
               </div>
               <ResizeHandle
@@ -448,6 +654,8 @@ function App() {
               <CodeEditor
                 file={activeFile}
                 onSave={handleSave}
+                onContentChange={handleContentChange}
+                currentDirPath={currentDirPath}
               />
             </ErrorBoundary>
           </div>

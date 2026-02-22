@@ -1,14 +1,14 @@
 const { WebSocketServer } = require('ws');
-const { createServer }    = require('http');
-const { spawn }           = require('child_process');
-const os   = require('os');
-const fs   = require('fs');
+const { createServer } = require('http');
+const { spawn } = require('child_process');
+const os = require('os');
+const fs = require('fs');
 const path = require('path');
 
-const PORT     = 3001;
+const PORT = 3001;
 const PLATFORM = os.platform(); // 'darwin' | 'linux' | 'win32'
-const HOME     = os.homedir();
-const USER     = os.userInfo().username;
+const HOME = os.homedir();
+const USER = os.userInfo().username;
 
 // ─── Platform'a göre shell seçimi ──────────────────────────────────────────
 const getShell = () => {
@@ -37,23 +37,234 @@ const spawnCommand = (cmd, cwd) => {
 
 // ANSI renk kodları
 const c = {
-  reset : '\x1b[0m',
-  green : '\x1b[32m',
-  cyan  : '\x1b[36m',
-  red   : '\x1b[31m',
+  reset: '\x1b[0m',
+  green: '\x1b[32m',
+  cyan: '\x1b[36m',
+  red: '\x1b[31m',
 };
 
-const server = createServer((_req, res) => { res.end('Terminal OK'); });
-const wss    = new WebSocketServer({ server });
+// ─── HTTP API — Dosya sistemi işlemleri (Brave/Firefox fallback) ─────────
+const parseBody = (req) => new Promise((resolve, reject) => {
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', () => {
+    try { resolve(JSON.parse(body)); }
+    catch (_) { resolve({}); }
+  });
+  req.on('error', reject);
+});
+
+// Rekürsif dizin okuma (sadece ilk seviye)
+const readDirTree = (dirPath) => {
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  const result = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue; // Gizli dosyaları atla
+    result.push({
+      name: entry.name,
+      type: entry.isDirectory() ? 'folder' : 'file',
+      children: entry.isDirectory() ? [] : undefined,
+    });
+  }
+  result.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return result;
+};
+
+// Rekürsif dizin okuma (tüm derinlik)
+const readDirTreeDeep = (dirPath) => {
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  const result = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue;
+    if (entry.isDirectory()) {
+      result.push({
+        name: entry.name,
+        type: 'folder',
+        children: readDirTreeDeep(path.join(dirPath, entry.name)),
+      });
+    } else {
+      result.push({ name: entry.name, type: 'file' });
+    }
+  }
+  result.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return result;
+};
+
+const server = createServer(async (req, res) => {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  // ─── API: Dizin oku ─────────────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/read-dir') {
+    const body = await parseBody(req);
+    const dirPath = body.path;
+    if (!dirPath || !fs.existsSync(dirPath)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Geçersiz dizin yolu' }));
+      return;
+    }
+    try {
+      const deep = body.deep === true;
+      const children = deep ? readDirTreeDeep(dirPath) : readDirTree(dirPath);
+      const tree = {
+        name: path.basename(dirPath),
+        type: 'folder',
+        children,
+        _serverPath: dirPath,
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(tree));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: Dosya kaydet ──────────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/save-file') {
+    const body = await parseBody(req);
+    const filePath = body.path;
+    const content = body.content;
+    if (!filePath || content === undefined) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'path ve content gerekli' }));
+      return;
+    }
+    try {
+      // Üst dizini oluştur (yoksa)
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, content, 'utf-8');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, path: filePath }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: Dosya oku ─────────────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/read-file') {
+    const body = await parseBody(req);
+    const filePath = body.path;
+    if (!filePath || !fs.existsSync(filePath)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Dosya bulunamadı' }));
+      return;
+    }
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ content, name: path.basename(filePath) }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: Alt dizin oku (lazy load) ─────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/read-subdir') {
+    const body = await parseBody(req);
+    const dirPath = body.path;
+    if (!dirPath || !fs.existsSync(dirPath)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Dizin bulunamadı' }));
+      return;
+    }
+    try {
+      const children = readDirTree(dirPath);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ children }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: Dosya/klasör yeniden adlandır ────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/rename') {
+    const body = await parseBody(req);
+    const { oldPath, newPath } = body;
+    if (!oldPath || !newPath) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'oldPath ve newPath gerekli' }));
+      return;
+    }
+    if (!fs.existsSync(oldPath)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Kaynak bulunamadı' }));
+      return;
+    }
+    try {
+      fs.renameSync(oldPath, newPath);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, oldPath, newPath }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: Dosya/klasör sil ──────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/delete') {
+    const body = await parseBody(req);
+    const targetPath = body.path;
+    if (!targetPath) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'path gerekli' }));
+      return;
+    }
+    if (!fs.existsSync(targetPath)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Hedef bulunamadı' }));
+      return;
+    }
+    try {
+      const stat = fs.statSync(targetPath);
+      if (stat.isDirectory()) {
+        fs.rmSync(targetPath, { recursive: true, force: true });
+      } else {
+        fs.unlinkSync(targetPath);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, path: targetPath }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  res.end('Terminal OK');
+});
+const wss = new WebSocketServer({ server });
 
 // ─── Her bağlantı için ayrı state ──────────────────────────────────────────
 wss.on('connection', (ws) => {
-  let cwd        = HOME;
-  let line       = '';
-  let cursor     = 0;
-  let history    = [];
-  let histIdx    = -1;
-  let savedLine  = '';
+  let cwd = HOME;
+  let line = '';
+  let cursor = 0;
+  let history = [];
+  let histIdx = -1;
+  let savedLine = '';
   let activeProc = null;
 
   // ─── Prompt ──────────────────────────────────────────────────────────────
@@ -85,12 +296,12 @@ wss.on('connection', (ws) => {
     if (/^cd(\s+.*)?$/.test(cmd)) {
       const arg = cmd.slice(2).trim();
       let target;
-      if (!arg || arg === '~')        target = HOME;
-      else if (arg === '-')           target = cwd;
+      if (!arg || arg === '~') target = HOME;
+      else if (arg === '-') target = cwd;
       else if (arg.startsWith('~/') || arg.startsWith('~\\'))
-                                      target = path.join(HOME, arg.slice(2));
-      else if (path.isAbsolute(arg))  target = arg;
-      else                            target = path.join(cwd, arg);
+        target = path.join(HOME, arg.slice(2));
+      else if (path.isAbsolute(arg)) target = arg;
+      else target = path.join(cwd, arg);
 
       target = path.resolve(target);
       try {
@@ -127,8 +338,8 @@ wss.on('connection', (ws) => {
 
   // ─── Tab tamamlama ─────────────────────────────────────────────────────
   const doTab = () => {
-    const parts  = line.split(' ');
-    const last   = parts[parts.length - 1];
+    const parts = line.split(' ');
+    const last = parts[parts.length - 1];
 
     const sep = PLATFORM === 'win32' ? '\\' : '/';
     const hasPath = last.includes('/') || last.includes('\\');
@@ -148,10 +359,10 @@ wss.on('connection', (ws) => {
       try {
         const full = path.join(searchDir, matches[0]);
         const isDir = fs.statSync(full).isDirectory();
-        line   += add + (isDir ? sep : '');
+        line += add + (isDir ? sep : '');
         cursor += add.length + (isDir ? 1 : 0);
       } catch (_) {
-        line   += add;
+        line += add;
         cursor += add.length;
       }
       redrawLine();
@@ -196,35 +407,35 @@ wss.on('connection', (ws) => {
                 cwd = path.resolve(c);
                 break;
               }
-            } catch (_) {}
+            } catch (_) { }
           }
           sendPrompt();
         }
         return;
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // ─── Aktif interaktif process (python, node vb.) ────────────────────
     if (activeProc) {
       if (raw === '\x03') { // Ctrl+C
-        try { activeProc.kill('SIGINT'); } catch (_) {}
+        try { activeProc.kill('SIGINT'); } catch (_) { }
         ws.send('^C\r\n');
         activeProc = null;
         sendPrompt();
         return;
       }
       if (raw === '\r' || raw === '\n') {
-        try { activeProc.stdin.write('\n'); } catch (_) {}
+        try { activeProc.stdin.write('\n'); } catch (_) { }
         ws.send('\r\n');
         return;
       }
       if (raw === '\x7f' || raw === '\b') {
-        try { activeProc.stdin.write(raw); } catch (_) {}
+        try { activeProc.stdin.write(raw); } catch (_) { }
         ws.send('\b \b');
         return;
       }
       if (!raw.startsWith('\x1b') && (raw >= ' ' || raw === '\t')) {
-        try { activeProc.stdin.write(raw); } catch (_) {}
+        try { activeProc.stdin.write(raw); } catch (_) { }
         ws.send(raw);
       }
       return;
@@ -296,7 +507,7 @@ wss.on('connection', (ws) => {
     if (raw.startsWith('\x1b')) return; // Diğer escape'leri yoksay
 
     // Yazılabilir karakter
-    line   = line.slice(0, cursor) + raw + line.slice(cursor);
+    line = line.slice(0, cursor) + raw + line.slice(cursor);
     cursor += raw.length;
     if (cursor === line.length) {
       ws.send(raw);

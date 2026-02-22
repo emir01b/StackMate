@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { ChevronRight, ChevronDown, File, Folder } from 'lucide-react';
+import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Edit3, Trash2 } from 'lucide-react';
+import { apiReadFile } from '../utils/fileApi';
 import './FileExplorer.css';
 
-const FileExplorer = ({ onFileSelect, customFiles }) => {
+const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete, currentDirPath }) => {
   const [expanded, setExpanded] = useState(new Set());
   const [fileStructure, setFileStructure] = useState(null);
+  const [selectedNode, setSelectedNode] = useState(null); // Seçili dosya/klasör
 
   useEffect(() => {
     if (customFiles) {
@@ -69,7 +71,7 @@ const FileExplorer = ({ onFileSelect, customFiles }) => {
     setExpanded(newExpanded);
   };
 
-  const handleFileClick = async (node) => {
+  const handleFileClick = async (node, nodePath) => {
     if (node.type === 'folder') return;
 
     if (node.handle) {
@@ -91,6 +93,19 @@ const FileExplorer = ({ onFileSelect, customFiles }) => {
         console.error('Dosya okunamadı:', err.message);
         alert('Dosya okunamadı: ' + err.message);
       }
+    } else if (currentDirPath) {
+      // Backend API — sunucudan dosya içeriğini oku
+      try {
+        const parts = nodePath.split('/');
+        parts.shift(); // root klasör adını kaldır
+        const relativePath = parts.join('\\');
+        const fullPath = currentDirPath + '\\' + relativePath;
+        const result = await apiReadFile(fullPath);
+        onFileSelect({ name: node.name, content: result.content, handle: null });
+      } catch (err) {
+        console.error('Dosya okunamadı:', err.message);
+        alert('Dosya okunamadı: ' + err.message);
+      }
     } else {
       onFileSelect({ name: node.name, content: node.content || '' });
     }
@@ -100,13 +115,26 @@ const FileExplorer = ({ onFileSelect, customFiles }) => {
     const currentPath = path ? `${path}/${node.name}` : node.name;
     const isExpanded = expanded.has(currentPath);
     const isFolder = node.type === 'folder';
+    const isSelected = selectedNode?.path === currentPath;
+
+    const handleClick = (e) => {
+      e.stopPropagation();
+      // Seçili yap
+      setSelectedNode({ name: node.name, path: currentPath, type: node.type });
+      // Klasörse aç/kapat, dosyaysa dosya aç
+      if (isFolder) {
+        toggleFolder(currentPath, node);
+      } else {
+        handleFileClick(node, currentPath);
+      }
+    };
 
     return (
       <div>
         <div
-          className="file-tree-node"
+          className={`file-tree-node ${isSelected ? 'selected' : ''}`}
           style={{ paddingLeft: `${level * 16 + 8}px` }}
-          onClick={() => isFolder ? toggleFolder(currentPath, node) : handleFileClick(node)}
+          onClick={handleClick}
         >
           {isFolder ? (
             <>
@@ -153,7 +181,32 @@ const FileExplorer = ({ onFileSelect, customFiles }) => {
   return (
     <div className="file-explorer-container">
       <div className="file-explorer-header">
-        EXPLORER — {fileStructure.name}
+        <span>EXPLORER — {fileStructure.name}</span>
+        <div className="explorer-header-actions">
+          {selectedNode && onRename && (
+            <button
+              className="explorer-action-btn"
+              onClick={() => onRename(selectedNode)}
+              title={`Yeniden Adlandır: ${selectedNode.name}`}
+            >
+              <Edit3 size={14} />
+            </button>
+          )}
+          {selectedNode && onDelete && (
+            <button
+              className="explorer-action-btn delete-btn"
+              onClick={() => onDelete(selectedNode)}
+              title={`Sil: ${selectedNode.name}`}
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+          {onRefresh && (
+            <button className="explorer-action-btn" onClick={onRefresh} title="Yenile">
+              <RefreshCw size={14} />
+            </button>
+          )}
+        </div>
       </div>
       <FileTreeNode node={fileStructure} />
     </div>
