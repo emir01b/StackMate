@@ -253,6 +253,78 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ─── API: LM Studio proxy (CORS bypass) — chat completions ────────
+  if (req.method === 'POST' && req.url === '/api/ai-chat') {
+    const body = await parseBody(req);
+    try {
+      const http = require('http');
+      const postData = JSON.stringify(body);
+
+      const proxyReq = http.request({
+        hostname: '127.0.0.1',
+        port: 1234,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+        },
+      }, (proxyRes) => {
+        // Streaming header'larını kopyala
+        res.writeHead(proxyRes.statusCode, {
+          'Content-Type': proxyRes.headers['content-type'] || 'text/event-stream',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        });
+        // Veriyi olduğu gibi pipe et (streaming destekli)
+        proxyRes.pipe(res);
+      });
+
+      proxyReq.on('error', (err) => {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'LM Studio bağlantı hatası: ' + err.message }));
+      });
+
+      proxyReq.write(postData);
+      proxyReq.end();
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: LM Studio proxy — model listesi ────────────────────────
+  if (req.method === 'GET' && req.url === '/api/ai-models') {
+    try {
+      const http = require('http');
+      const proxyReq = http.request({
+        hostname: '127.0.0.1',
+        port: 1234,
+        path: '/v1/models',
+        method: 'GET',
+      }, (proxyRes) => {
+        res.writeHead(proxyRes.statusCode, {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        });
+        proxyRes.pipe(res);
+      });
+
+      proxyReq.on('error', (err) => {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'LM Studio bağlantı hatası: ' + err.message }));
+      });
+
+      proxyReq.end();
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   res.end('Terminal OK');
 });
 const wss = new WebSocketServer({ server });

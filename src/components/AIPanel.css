@@ -14,12 +14,101 @@
   letter-spacing: 0.5px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+}
+
+.ai-header-left {
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
 
 .header-icon {
   width: 20px;
   height: 20px;
+}
+
+/* Bağlantı durumu noktası */
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.connection-dot.connected {
+  background-color: #4ec940;
+  box-shadow: 0 0 6px rgba(78, 201, 64, 0.5);
+}
+
+.connection-dot.disconnected {
+  background-color: #f44747;
+  box-shadow: 0 0 6px rgba(244, 71, 71, 0.5);
+}
+
+.connection-dot.checking {
+  background-color: #cca700;
+  animation: pulse-check 1.5s infinite;
+}
+
+@keyframes pulse-check {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* Sohbet temizle butonu */
+.clear-chat-btn {
+  background: none;
+  border: none;
+  color: #858585;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+.clear-chat-btn:hover {
+  color: #f48771;
+  background-color: #4d1e1e;
+}
+
+/* Bağlantı uyarısı */
+.connection-warning {
+  background-color: #5a3e28;
+  color: #f5c862;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  border-bottom: 1px solid #3e3e42;
+}
+
+.connection-warning code {
+  background-color: rgba(0, 0, 0, 0.3);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+/* Aktif model bilgisi */
+.model-info {
+  background-color: #1e3a2f;
+  color: #89d185;
+  padding: 6px 12px;
+  font-size: 11px;
+  border-bottom: 1px solid #3e3e42;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .messages-container {
@@ -89,6 +178,7 @@
   font-size: 13px;
   line-height: 1.5;
   white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .typing-indicator {
@@ -117,9 +207,13 @@
 }
 
 @keyframes typing-bounce {
-  0%, 60%, 100% {
+
+  0%,
+  60%,
+  100% {
     transform: translateY(0);
   }
+
   30% {
     transform: translateY(-8px);
   }
@@ -152,6 +246,11 @@
   color: #858585;
 }
 
+.message-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .send-button {
   background-color: #0e639c;
   color: white;
@@ -177,4 +276,20 @@
 .send-icon {
   width: 16px;
   height: 16px;
+}
+
+/* Durdur butonu */
+.stop-btn {
+  background-color: #c24038;
+}
+
+.stop-btn:hover {
+  background-color: #d44f47 !important;
+}
+
+.stop-icon {
+  width: 12px;
+  height: 12px;
+  background-color: white;
+  border-radius: 2px;
 }

@@ -13,7 +13,7 @@ Tarayıcı tabanlı, Monaco Editor kullanan, tam işlevsel bir geliştirme ortam
 | **Tab Yönetimi** | Çoklu dosya sekmeleri, sekmeler arası geçiş, sekme kapatma |
 | **Kaydetme** | Ctrl+S / Cmd+S ile yerel dosyaya kayıt (File System Access API) |
 | **Terminal** | WebSocket tabanlı gerçek terminal — komut geçmişi, ok tuşları, tab tamamlama |
-| **AI Panel** | Yerleşik asistan alanı |
+| **AI Panel** | LM Studio entegrasyonu — yerel yapay zeka ile sohbet, streaming yanıt, otomatik model algılama |
 | **Resize** | Tüm paneller sürükleyerek boyutlandırılabilir |
 | **State Kalıcılığı** | Son açılan klasör, dosyalar, terminal durumu ve panel boyutları kaydedilir |
 
@@ -64,8 +64,9 @@ web-ide/
 │   │   ├── ResizeHandle.jsx/css # Sürükleyerek boyutlandırma
 │   │   └── ErrorBoundary.jsx    # Hata yakalama (sayfa boşalmasını önler)
 │   └── utils/
-│       └── storage.js       # IndexedDB + localStorage yardımcıları
-├── terminal-server.cjs      # Node.js WebSocket terminal backend
+│       ├── storage.js       # IndexedDB + localStorage yardımcıları
+│       └── fileApi.js       # Backend dosya sistemi API yardımcıları
+├── terminal-server.cjs      # Node.js WebSocket terminal + dosya API + AI proxy backend
 ├── package.json
 └── vite.config.js
 ```
@@ -146,6 +147,44 @@ Node.js terminal-server.cjs
 ```
 
 **Not:** `node-pty` kuruluysa tam PTY moduna geçer (interaktif uygulamalar daha iyi çalışır). Yoksa yerleşik readline emülatörü devreye girer.
+
+---
+
+## AI Asistan (LM Studio Entegrasyonu)
+
+IDE'nin sağ panelindeki yapay zeka asistanı, yerel makinenizde çalışan [LM Studio](https://lmstudio.ai/) ile entegre çalışır. Verileriniz dışarı çıkmaz — her şey bilgisayarınızda kalır.
+
+### Kurulum
+
+1. [LM Studio](https://lmstudio.ai/)'yu indirip kurun
+2. İstediğiniz bir modeli yükleyin (örn: `glm-4.6v-flash`, `llama`, `mistral` vb.)
+3. LM Studio'da **Developer** sekmesine gidin ve sunucuyu başlatın
+4. Sunucunun `http://127.0.0.1:1234` adresinde çalıştığından emin olun
+5. IDE'yi açın — AI paneli otomatik olarak bağlanacaktır
+
+### Mimari
+
+```
+Tarayıcı (AIPanel.jsx)
+      │ HTTP POST (streaming)
+      ▼
+terminal-server.cjs (:3001/api/ai-chat)   ← CORS proxy
+      │ HTTP POST
+      ▼
+LM Studio (:1234/v1/chat/completions)     ← OpenAI uyumlu API
+```
+
+> Tarayıcılar farklı port'lar arası istekleri CORS nedeniyle engellediğinden, istekler `terminal-server.cjs` üzerindeki proxy aracılığıyla yönlendirilir.
+
+### Özellikler
+
+- 🔄 **Otomatik Model Algılama** — LM Studio'da hangi model yüklüyse onu kullanır, model değiştirince otomatik güncellenir
+- 📡 **Streaming Yanıt** — Cevaplar kelime kelime anlık olarak ekrana yazılır
+- 🟢 **Bağlantı Durumu** — Header'da yeşil/kırmızı nokta ile bağlantı göstergesi
+- 🤖 **Model Bilgisi** — Aktif model adı panelde görüntülenir
+- ⏹️ **Yanıt Durdurma** — Uzun yanıtları istediğiniz an durdurabilirsiniz
+- 🗑️ **Sohbet Temizleme** — Konuşma geçmişini sıfırlama
+- 💬 **Bağlam Hafızası** — Tüm konuşma geçmişi modele gönderilir, önceki mesajları hatırlar
 
 ---
 
