@@ -100,6 +100,18 @@ const Terminal = ({ onClose, workingDirectory }) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(data);
     });
 
+    // Dışarıdan terminal temizleme isteği
+    const onClearRequest = () => {
+      try {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send('clear\r');
+        } else {
+          term.clear();
+        }
+      } catch (_) { }
+    };
+    window.addEventListener('terminal-clear', onClearRequest);
+
     // Pencere boyutu değişince
     const onResize = () => {
       if (!safeFit()) return;
@@ -118,6 +130,7 @@ const Terminal = ({ onClose, workingDirectory }) => {
 
     return () => {
       mountedRef.current = false;
+      window.removeEventListener('terminal-clear', onClearRequest);
       window.removeEventListener('resize', onResize);
       ro?.disconnect();
       try { ws.close(); } catch (_) {}

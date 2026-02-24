@@ -1,6 +1,6 @@
 .file-explorer-container {
   height: 100%;
-  background-color: #252526;
+  background-color: #181818;
   color: #cccccc;
   overflow-y: auto;
 }
@@ -9,12 +9,22 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px;
-  border-bottom: 1px solid #3e3e42;
-  font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.5px;
-  color: #cccccc;
+  padding: 0 6px 0 16px;
+  height: 35px;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #bbbbbb;
+  text-transform: uppercase;
+  border-bottom: 1px solid #252525;
+  flex-shrink: 0;
+}
+
+.explorer-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .explorer-header-actions {
@@ -38,29 +48,30 @@
 
 .explorer-action-btn:hover {
   color: #cccccc;
-  background-color: #3e3e42;
+  background-color: rgba(255,255,255,0.08);
 }
 
 .explorer-action-btn.delete-btn:hover {
   color: #f48771;
-  background-color: #4d1e1e;
+  background-color: rgba(244,135,113,0.1);
 }
 
 .file-tree-node {
   display: flex;
   align-items: center;
-  padding: 4px 8px;
+  padding: 3px 8px;
   cursor: pointer;
   font-size: 13px;
-  transition: background-color 0.1s;
+  transition: background-color 0.08s;
+  gap: 0;
 }
 
 .file-tree-node:hover {
-  background-color: #2a2d2e;
+  background-color: rgba(255,255,255,0.06);
 }
 
 .file-tree-node.selected {
-  background-color: #094771;
+  background-color: #1a3a5c;
   color: #ffffff;
 }
 
@@ -71,33 +82,40 @@
 }
 
 .chevron {
-  margin-right: 4px;
+  margin-right: 2px;
+  color: #858585;
 }
 
 .icon-spacer {
   width: 16px;
-  margin-right: 4px;
+  margin-right: 2px;
 }
 
 .folder-icon {
-  margin-right: 8px;
+  margin-right: 6px;
   color: #dcb67a;
 }
 
 .file-icon {
-  margin-right: 8px;
-  color: #858585;
+  margin-right: 6px;
+  color: #6a9fd8;
 }
 
 .node-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: 13px;
 }
 
 .explorer-empty {
-  padding: 16px;
-  color: #858585;
+  padding: 20px 16px;
+  color: #666;
   font-size: 13px;
   line-height: 1.8;
+  text-align: center;
+}
+
+.explorer-empty strong {
+  color: #999;
 }

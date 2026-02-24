@@ -87,3 +87,17 @@ export const apiDelete = async (filePath) => {
     if (!res.ok) throw new Error((await res.json()).error || 'Silme hatası');
     return res.json();
 };
+
+/**
+ * Backend üzerinden klasör oluştur
+ * @param {string} dirPath - Oluşturulacak dizin yolu
+ */
+export const apiMkdir = async (dirPath) => {
+    const res = await fetch(`${API_BASE}/mkdir`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: dirPath }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'Klasör oluşturma hatası');
+    return res.json();
+};

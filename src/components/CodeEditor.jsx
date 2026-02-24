@@ -20,10 +20,9 @@ const getLanguage = (filename) => {
   return LANGUAGE_MAP[ext] || 'plaintext';
 };
 
-// Normalize: her zaman string döndür
 const safeContent = (v) => (typeof v === 'string' ? v : '');
 
-const CodeEditor = ({ file, onSave, onContentChange, currentDirPath }) => {
+const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorChange, onEditorMount }) => {
   const editorRef = useRef(null);
   const saveToastRef = useRef(null);
   const contentChangeTimerRef = useRef(null);
@@ -38,14 +37,14 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath }) => {
     }, 2000);
   };
 
+  // ─── Tüm hook'lar erken return'den ÖNCE ─────────────────────────────────
+
   const doSave = useCallback(async () => {
     const editor = editorRef.current;
     if (!editor) return;
-
     const content = editor.getValue();
 
     if (file?.handle) {
-      // Native FS — doğrudan diske yaz
       try {
         const writable = await file.handle.createWritable();
         await writable.write(content);
@@ -56,7 +55,6 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath }) => {
         showToast('✗ ' + err.message, true);
       }
     } else if (file && currentDirPath) {
-      // Backend API — sunucu üzerinden proje klasörüne kaydet
       try {
         const filePath = currentDirPath + '\\' + file.name;
         await apiSaveFile(filePath, content);
@@ -66,7 +64,6 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath }) => {
         showToast('✗ ' + err.message, true);
       }
     } else if (file) {
-      // Son çare — dosyayı indir
       try {
         const blob = new Blob([content], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
@@ -87,12 +84,23 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath }) => {
     }
   }, [file, onSave, currentDirPath]);
 
-  const handleMount = (editor, monaco) => {
-    editorRef.current = editor;
-    // Ctrl+S / Cmd+S
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, doSave);
-  };
+  const handleEditorChange = useCallback((value) => {
+    if (contentChangeTimerRef.current) clearTimeout(contentChangeTimerRef.current);
+    contentChangeTimerRef.current = setTimeout(() => {
+      onContentChange?.(value);
+    }, 300);
+  }, [onContentChange]);
 
+  const handleMount = useCallback((editor, monaco) => {
+    editorRef.current = editor;
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, doSave);
+    editor.onDidChangeCursorPosition((e) => {
+      onCursorChange?.({ line: e.position.lineNumber, col: e.position.column });
+    });
+    onEditorMount?.(editor);
+  }, [doSave, onCursorChange, onEditorMount]);
+
+  // ─── Erken return (hook'lardan SONRA) ───────────────────────────────────
   if (!file) {
     return (
       <div className="code-editor-container">
@@ -107,16 +115,6 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath }) => {
     );
   }
 
-  // İçerik değiştiğinde üst bileşene bildir (debounced)
-  const handleEditorChange = useCallback((value) => {
-    if (contentChangeTimerRef.current) {
-      clearTimeout(contentChangeTimerRef.current);
-    }
-    contentChangeTimerRef.current = setTimeout(() => {
-      onContentChange?.(value);
-    }, 300);
-  }, [onContentChange]);
-
   return (
     <div className="code-editor-container">
       <div className="save-toast" ref={saveToastRef} />
@@ -128,7 +126,6 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath }) => {
         </button>
       </div>
       <div className="editor-wrapper">
-        {/* key: dosya adı + içerik uzunluğu — dışarıdan içerik değiştiğinde Monaco yeniden yüklenir */}
         <Editor
           key={file.name + '::' + (file.content?.length || 0)}
           height="100%"

@@ -1,6 +1,6 @@
-# Web IDE
+# StackMate — Web IDE
 
-Tarayıcı tabanlı, Monaco Editor kullanan, tam işlevsel bir geliştirme ortamı (IDE). Electron'a dönüştürülmeye hazır.
+Tarayıcı tabanlı, Monaco Editor kullanan, koyu temalı bir geliştirme ortamı (IDE). Electron'a dönüştürülmeye hazır.
 
 ---
 
@@ -16,6 +16,8 @@ Tarayıcı tabanlı, Monaco Editor kullanan, tam işlevsel bir geliştirme ortam
 | **AI Panel** | LM Studio entegrasyonu — yerel yapay zeka ile sohbet, streaming yanıt, otomatik model algılama |
 | **Resize** | Tüm paneller sürükleyerek boyutlandırılabilir |
 | **State Kalıcılığı** | Son açılan klasör, dosyalar, terminal durumu ve panel boyutları kaydedilir |
+| **IDE Benzeri Menü** | Üst menü (File/Edit/Selection/View/Go/Terminal/Help) + sağ tarafta hızlı butonlar |
+| **Explorer Hızlı Aksiyonlar** | Explorer başlığında Yeni Dosya / Yeni Klasör / Yeniden Adlandır / Sil / Yenile |
 
 ---
 
@@ -23,7 +25,7 @@ Tarayıcı tabanlı, Monaco Editor kullanan, tam işlevsel bir geliştirme ortam
 
 ```bash
 # Projeyi klon'la veya klasöre gir
-cd web-ide
+cd StackMate
 
 # Bağımlılıkları yükle
 npm install
@@ -34,7 +36,7 @@ npm install
 ## Çalıştırma
 
 ```bash
-# Hem frontend (Vite) hem terminal backend'i birlikte başlatır
+# Hem frontend (Vite) hem terminal + dosya API + AI proxy backend'i birlikte başlatır
 npm run dev:all
 ```
 
@@ -48,20 +50,21 @@ Terminal backend: `http://localhost:3001`
 ## Proje Yapısı
 
 ```
-web-ide/
+StackMate/
 ├── src/
 │   ├── App.jsx              # Ana uygulama — state, layout, panel resize
 │   ├── App.css              # Genel layout stilleri
 │   ├── main.jsx             # React giriş noktası
 │   ├── index.css            # Global sıfırlama
 │   ├── components/
-│   │   ├── Navbar.jsx/css       # Üst menü çubuğu (File, Edit, View, Terminal)
+│   │   ├── Navbar.jsx/css       # Üst menü çubuğu + sağ butonlar
 │   │   ├── FileExplorer.jsx/css # Sol dosya gezgini
 │   │   ├── TabBar.jsx/css       # Sekme çubuğu
 │   │   ├── CodeEditor.jsx/css   # Monaco Editor sarmalayıcı
 │   │   ├── Terminal.jsx/css     # XTerm.js terminal bileşeni
 │   │   ├── AIPanel.jsx/css      # AI asistan paneli
 │   │   ├── ResizeHandle.jsx/css # Sürükleyerek boyutlandırma
+│   │   ├── StatusBar.jsx/css    # Alt durum çubuğu
 │   │   └── ErrorBoundary.jsx    # Hata yakalama (sayfa boşalmasını önler)
 │   └── utils/
 │       ├── storage.js       # IndexedDB + localStorage yardımcıları
@@ -82,6 +85,9 @@ web-ide/
 | `Ctrl+O` | Dosya aç |
 | `Ctrl+\`` | Terminal aç/kapat |
 | `Ctrl+Shift+E` | Explorer aç/kapat |
+| `Ctrl+F` | Bul (editörde) |
+| `Ctrl+H` | Değiştir (editörde) |
+| `Shift+Alt+F` | Kodu biçimlendir |
 | `F11` | Tam ekran |
 
 **Terminal kısayolları:**

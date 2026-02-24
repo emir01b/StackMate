@@ -1,0 +1,91 @@
+.status-bar {
+  height: 22px;
+  background-color: #007acc;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px;
+  font-size: 11px;
+  color: #fff;
+  user-select: none;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.status-left {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  height: 22px;
+  white-space: nowrap;
+  color: #fff;
+  font-size: 11px;
+}
+
+button.status-item {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #fff;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.status-item.clickable {
+  cursor: pointer;
+}
+
+button.status-item.clickable:hover,
+.status-item.clickable:hover {
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
+.status-branch {
+  font-weight: 400;
+}
+
+.status-separator {
+  color: rgba(255,255,255,0.3);
+  padding: 0 2px;
+  font-size: 10px;
+}
+
+.status-error {
+  color: #f48771;
+}
+
+.status-warning {
+  color: #cca700;
+}
+
+.status-ok {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.status-lang {
+  font-weight: 400;
+}
+
+.status-brand {
+  font-weight: 500;
+  gap: 3px;
+  opacity: 0.9;
+}
+
+.status-time {
+  font-family: 'Consolas', 'Courier New', monospace;
+  opacity: 0.85;
+}

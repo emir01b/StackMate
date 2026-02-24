@@ -1,17 +1,18 @@
 .ai-panel-container {
   height: 100%;
-  background-color: #252526;
+  background-color: #181818;
   color: #cccccc;
   display: flex;
   flex-direction: column;
 }
 
 .ai-panel-header {
-  padding: 12px;
-  border-bottom: 1px solid #3e3e42;
-  font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.5px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid #2a2a2a;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -79,17 +80,17 @@
 
 .clear-chat-btn:hover {
   color: #f48771;
-  background-color: #4d1e1e;
+  background-color: rgba(244,135,113,0.1);
 }
 
 /* Bağlantı uyarısı */
 .connection-warning {
-  background-color: #5a3e28;
+  background-color: rgba(90,62,40,0.5);
   color: #f5c862;
   padding: 8px 12px;
   font-size: 12px;
   line-height: 1.4;
-  border-bottom: 1px solid #3e3e42;
+  border-bottom: 1px solid #2a2a2a;
 }
 
 .connection-warning code {
@@ -101,11 +102,11 @@
 
 /* Aktif model bilgisi */
 .model-info {
-  background-color: #1e3a2f;
+  background-color: rgba(30,58,47,0.5);
   color: #89d185;
   padding: 6px 12px;
   font-size: 11px;
-  border-bottom: 1px solid #3e3e42;
+  border-bottom: 1px solid #2a2a2a;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -169,8 +170,9 @@
 }
 
 .assistant-bubble {
-  background-color: #2d2d30;
+  background-color: #222222;
   color: #cccccc;
+  border: 1px solid #2a2a2a;
 }
 
 .message-bubble p {
@@ -220,7 +222,7 @@
 }
 
 .input-container {
-  border-top: 1px solid #3e3e42;
+  border-top: 1px solid #252525;
   padding: 12px;
   display: flex;
   gap: 8px;
@@ -228,9 +230,9 @@
 
 .message-input {
   flex: 1;
-  background-color: #3c3c3c;
+  background-color: #252525;
   color: #cccccc;
-  border: 1px solid #3e3e42;
+  border: 1px solid #333;
   border-radius: 4px;
   padding: 8px 12px;
   font-size: 13px;
@@ -239,7 +241,7 @@
 }
 
 .message-input:focus {
-  border-color: #0e639c;
+  border-color: #007acc;
 }
 
 .message-input::placeholder {

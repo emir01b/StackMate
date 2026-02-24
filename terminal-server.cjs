@@ -253,6 +253,26 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ─── API: Klasör oluştur ────────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/mkdir') {
+    const body = await parseBody(req);
+    const dirPath = body.path;
+    if (!dirPath) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'path gerekli' }));
+      return;
+    }
+    try {
+      fs.mkdirSync(dirPath, { recursive: true });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, path: dirPath }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // ─── API: LM Studio proxy (CORS bypass) — chat completions ────────
   if (req.method === 'POST' && req.url === '/api/ai-chat') {
     const body = await parseBody(req);

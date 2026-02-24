@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Navbar from './components/Navbar';
+import StatusBar from './components/StatusBar';
 import FileExplorer from './components/FileExplorer';
 import CodeEditor from './components/CodeEditor';
 import TabBar from './components/TabBar';
@@ -14,7 +15,7 @@ import {
   saveTerminalState, loadTerminalState,
   savePanelSizes, loadPanelSizes,
 } from './utils/storage';
-import { apiReadDir, apiSaveFile, apiReadFile, apiRename, apiDelete } from './utils/fileApi';
+import { apiReadDir, apiSaveFile, apiReadFile, apiRename, apiDelete, apiMkdir } from './utils/fileApi';
 import './App.css';
 
 // Fallback: Düz dosya listesinden ağaç yapısı oluştur
@@ -95,6 +96,10 @@ function App() {
   const [showExplorer, setShowExplorer] = useState(true);
   const [showAI, setShowAI] = useState(true);
   const [showTerminal, setShowTerminal] = useState(false);
+  const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
+
+  // Monaco editör instance (Find/Replace/Format için)
+  const monacoEditorRef = useRef(null);
 
   // Panel boyutları (piksel cinsinden)
   const [explorerWidth, setExplorerWidth] = useState(null);
@@ -536,10 +541,6 @@ function App() {
     // Kullanıcıya proje yolunu soralım (bir kere)
     const rootName = fileArray[0]?.webkitRelativePath?.split('/')[0];
     if (rootName) {
-      // Bilinen olası yolları dene
-      const possiblePaths = [
-        `C:\\Users\\${navigator.userAgent.includes('Windows') ? '' : ''}`,
-      ];
       // En basit yaklaşım: kullanıcıya sor
       const savedPath = localStorage.getItem('stackmate_project_path');
       if (savedPath && savedPath.endsWith(rootName)) {
@@ -571,8 +572,45 @@ function App() {
     e.target.value = '';
   };
 
-  const handleViewAction = async (action) => {
+  // Monaco editör hazır olduğunda instance'ı sakla
+  const handleEditorMount = useCallback((editor) => {
+    monacoEditorRef.current = editor;
+  }, []);
+
+  // Monaco editör aksiyon tetikleyici
+  const triggerEditorAction = useCallback((actionId) => {
+    const editor = monacoEditorRef.current;
+    if (!editor) return;
+    try {
+      editor.getAction(actionId)?.run();
+    } catch (_) {}
+  }, []);
+
+  const handleNewFolderInExplorer = useCallback(async () => {
+    const folderName = prompt('Klasör adını girin:', 'yeni-klasör');
+    if (!folderName || !folderName.trim()) return;
+    const trimmed = folderName.trim();
+
+    if (currentDirHandle) {
+      try {
+        await currentDirHandle.getDirectoryHandle(trimmed, { create: true });
+        await refreshExplorer();
+      } catch (err) {
+        alert('Klasör oluşturulamadı: ' + err.message);
+      }
+    } else if (currentDirPath) {
+      try {
+        await apiMkdir(currentDirPath + '\\' + trimmed);
+        await refreshExplorer();
+      } catch (err) {
+        alert('Klasör oluşturulamadı: ' + err.message);
+      }
+    }
+  }, [currentDirHandle, currentDirPath, refreshExplorer]);
+
+  const handleViewAction = useCallback(async (action) => {
     switch (action) {
+      // ─── Panel toggle'ları ───────────────────────────────────────────────
       case 'toggle-explorer': setShowExplorer(v => !v); break;
       case 'toggle-ai': setShowAI(v => !v); break;
       case 'toggle-terminal': {
@@ -586,19 +624,65 @@ function App() {
         saveTerminalState(true);
         break;
       }
+      // ─── Editör aksiyonları ──────────────────────────────────────────────
+      case 'find': triggerEditorAction('actions.find'); break;
+      case 'replace': triggerEditorAction('editor.action.startFindReplaceAction'); break;
+      case 'format': triggerEditorAction('editor.action.formatDocument'); break;
+      case 'go-to-line': triggerEditorAction('editor.action.gotoLine'); break;
+      case 'go-to-symbol': triggerEditorAction('workbench.action.gotoSymbol'); break;
+      case 'go-to-definition': triggerEditorAction('editor.action.revealDefinition'); break;
+      case 'toggle-comment': triggerEditorAction('editor.action.commentLine'); break;
+      case 'select-all': triggerEditorAction('editor.action.selectAll'); break;
+      case 'undo': triggerEditorAction('undo'); break;
+      case 'redo': triggerEditorAction('redo'); break;
+      case 'toggle-word-wrap': triggerEditorAction('editor.action.toggleWordWrap'); break;
+      case 'move-line-up': triggerEditorAction('editor.action.moveLinesUpAction'); break;
+      case 'move-line-down': triggerEditorAction('editor.action.moveLinesDownAction'); break;
+      case 'copy-line-up': triggerEditorAction('editor.action.copyLinesUpAction'); break;
+      case 'copy-line-down': triggerEditorAction('editor.action.copyLinesDownAction'); break;
+      // ─── Ekran / Görünüm ────────────────────────────────────────────────
       case 'fullscreen':
         document.fullscreenElement
           ? document.exitFullscreen()
           : document.documentElement.requestFullscreen();
         break;
+      case 'zoom-in': {
+        const cur = parseFloat(getComputedStyle(document.documentElement).fontSize);
+        document.documentElement.style.fontSize = (cur * 1.1) + 'px';
+        break;
+      }
+      case 'zoom-out': {
+        const cur = parseFloat(getComputedStyle(document.documentElement).fontSize);
+        document.documentElement.style.fontSize = (cur * 0.9) + 'px';
+        break;
+      }
+      case 'zoom-reset':
+        document.documentElement.style.fontSize = '';
+        break;
+      // ─── Terminal ────────────────────────────────────────────────────────
+      case 'clear-terminal':
+        // Terminal bileşeni kendi clear event'ini dinliyor
+        window.dispatchEvent(new CustomEvent('terminal-clear'));
+        break;
+      // ─── Dosya / Explorer ─────────────────────────────────────────────
+      case 'new-file-in-explorer': handleFileAction('new-file'); break;
+      case 'new-folder-in-explorer': handleNewFolderInExplorer(); break;
+      case 'quick-open': handleFileAction('open-file'); break;
       default: break;
     }
-  };
+  }, [handleFileAction, handleNewFolderInExplorer, showTerminal, triggerEditorAction]);
 
   // ─── RENDER ───────────────────────────────────────────────────────────────
   return (
     <div className="app-root">
-      <Navbar onFileAction={handleFileAction} onViewAction={handleViewAction} />
+      <Navbar
+        onFileAction={handleFileAction}
+        onViewAction={handleViewAction}
+        projectName={files?.name || null}
+        showExplorer={showExplorer}
+        showTerminal={showTerminal}
+        showAI={showAI}
+      />
 
       {/* Gizli fallback input'lar — tüm tarayıcılar için */}
       <input
@@ -617,89 +701,101 @@ function App() {
         onChange={handleFileInputChange}
       />
 
-      <div className="app-main">
-        <div className="app-container">
-          {showExplorer && (
-            <>
-              <div
-                ref={explorerRef}
-                className="file-explorer"
-                style={{ width: explorerWidth ? `${explorerWidth}px` : undefined }}
-              >
-                <FileExplorer
-                  onFileSelect={openFileInTab}
-                  customFiles={files}
-                  onRefresh={refreshExplorer}
-                  onRename={handleRename}
-                  onDelete={handleDelete}
-                  currentDirPath={currentDirPath}
+      <div className="app-main-wrapper">
+        <div className="app-main">
+          <div className="app-container">
+            {showExplorer && (
+              <>
+                <div
+                  ref={explorerRef}
+                  className="file-explorer"
+                  style={{ width: explorerWidth ? `${explorerWidth}px` : undefined }}
+                >
+                  <FileExplorer
+                    onFileSelect={openFileInTab}
+                    customFiles={files}
+                    onRefresh={refreshExplorer}
+                    onRename={handleRename}
+                    onDelete={handleDelete}
+                    onNewFile={() => handleFileAction('new-file')}
+                    onNewFolder={handleNewFolderInExplorer}
+                    currentDirPath={currentDirPath}
+                  />
+                </div>
+                <ResizeHandle
+                  direction="horizontal"
+                  onResizeStart={getExplorerResizeStart}
+                  onResize={handleExplorerResize}
                 />
-              </div>
-              <ResizeHandle
-                direction="horizontal"
-                onResizeStart={getExplorerResizeStart}
-                onResize={handleExplorerResize}
-              />
-            </>
-          )}
+              </>
+            )}
 
-          <div className="code-editor">
-            <TabBar
-              tabs={openTabs}
-              activeTab={activeTab}
-              onTabClick={handleTabClick}
-              onTabClose={closeTab}
-            />
-            <ErrorBoundary label="Editör hatası">
-              <CodeEditor
-                file={activeFile}
-                onSave={handleSave}
-                onContentChange={handleContentChange}
-                currentDirPath={currentDirPath}
+            <div className="code-editor">
+              <TabBar
+                tabs={openTabs}
+                activeTab={activeTab}
+                onTabClick={handleTabClick}
+                onTabClose={closeTab}
               />
-            </ErrorBoundary>
+              <ErrorBoundary label="Editör hatası">
+                <CodeEditor
+                  file={activeFile}
+                  onSave={handleSave}
+                  onContentChange={handleContentChange}
+                  currentDirPath={currentDirPath}
+                  onCursorChange={setCursorPos}
+                  onEditorMount={handleEditorMount}
+                />
+              </ErrorBoundary>
+            </div>
+
+            {showAI && (
+              <>
+                <ResizeHandle
+                  direction="horizontal"
+                  onResizeStart={getAIResizeStart}
+                  onResize={handleAIResize}
+                />
+                <div
+                  ref={aiRef}
+                  className="ai-panel"
+                  style={{ width: aiWidth ? `${aiWidth}px` : undefined }}
+                >
+                  <AIPanel />
+                </div>
+              </>
+            )}
           </div>
 
-          {showAI && (
+          {showTerminal && (
             <>
               <ResizeHandle
-                direction="horizontal"
-                onResizeStart={getAIResizeStart}
-                onResize={handleAIResize}
+                direction="vertical"
+                onResizeStart={getTerminalResizeStart}
+                onResize={handleTerminalResize}
               />
               <div
-                ref={aiRef}
-                className="ai-panel"
-                style={{ width: aiWidth ? `${aiWidth}px` : undefined }}
+                ref={terminalRef}
+                className="terminal-panel"
+                style={{ height: terminalHeight ? `${terminalHeight}px` : undefined }}
               >
-                <AIPanel />
+                <ErrorBoundary label="Terminal hatası">
+                  <Terminal
+                    onClose={() => { setShowTerminal(false); saveTerminalState(false); }}
+                    workingDirectory={currentDirHandle?.name || null}
+                  />
+                </ErrorBoundary>
               </div>
             </>
           )}
         </div>
-
-        {showTerminal && (
-          <>
-            <ResizeHandle
-              direction="vertical"
-              onResizeStart={getTerminalResizeStart}
-              onResize={handleTerminalResize}
-            />
-            <div
-              ref={terminalRef}
-              className="terminal-panel"
-              style={{ height: terminalHeight ? `${terminalHeight}px` : undefined }}
-            >
-              <ErrorBoundary label="Terminal hatası">
-                <Terminal
-                  onClose={() => { setShowTerminal(false); saveTerminalState(false); }}
-                  workingDirectory={currentDirHandle?.name || null}
-                />
-              </ErrorBoundary>
-            </div>
-          </>
-        )}
       </div>
+
+      <StatusBar
+        activeFile={activeFile}
+        gitBranch={files?.name ? 'main' : 'main'}
+        cursorPos={cursorPos}
+      />
     </div>
   );
 }

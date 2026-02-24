@@ -1,76 +1,115 @@
 .navbar {
-  height: 35px;
-  background-color: #3c3c3c;
-  border-bottom: 1px solid #2d2d2d;
+  height: 30px;
+  background-color: #181818;
+  border-bottom: 1px solid #2a2a2a;
   display: flex;
   align-items: center;
-  padding: 0 8px;
+  padding: 0;
   color: #cccccc;
-  font-size: 13px;
+  font-size: 12px;
   user-select: none;
   position: relative;
   z-index: 1000;
+  flex-shrink: 0;
+  gap: 0;
+}
+
+/* ─── SOL BÖLÜM ─── */
+.navbar-left {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.navbar-logo {
+  width: 40px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.navbar-logo:hover {
+  background-color: rgba(255,255,255,0.06);
 }
 
 .navbar-menu {
   display: flex;
-  gap: 4px;
+  gap: 0;
+  height: 30px;
+  align-items: center;
 }
 
 .navbar-item {
   position: relative;
+  height: 30px;
+  display: flex;
+  align-items: center;
 }
 
 .navbar-label {
-  padding: 4px 12px;
+  padding: 0 8px;
+  height: 30px;
+  display: flex;
+  align-items: center;
   cursor: pointer;
-  border-radius: 3px;
+  border-radius: 0;
   transition: background-color 0.1s;
+  color: #cccccc;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .navbar-label:hover {
-  background-color: #505050;
+  background-color: rgba(255,255,255,0.08);
 }
 
 .navbar-label.active {
-  background-color: #505050;
+  background-color: rgba(255,255,255,0.1);
 }
 
+/* ─── DROPDOWN ─── */
 .navbar-dropdown {
   position: absolute;
   top: 100%;
   left: 0;
-  margin-top: 0;
-  min-width: 280px;
-  background-color: #252526;
-  border: 1px solid #454545;
-  border-radius: 4px;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4);
+  margin-top: 1px;
+  min-width: 300px;
+  background-color: #1f1f1f;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
   padding: 4px 0;
   z-index: 2000;
+  animation: dropdown-appear 0.1s ease-out;
 }
 
 .dropdown-item {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 6px 20px;
-  cursor: pointer;
-  transition: background-color 0.1s;
+  justify-content: space-between;
+  padding: 5px 14px 5px 20px;
+  cursor: default;
+  transition: background-color 0.08s;
   color: #cccccc;
-}
-
-.dropdown-item:hover {
-  background-color: #094771;
+  font-size: 12px;
+  gap: 24px;
 }
 
 .dropdown-item.clickable {
   cursor: pointer;
 }
 
+.dropdown-item.clickable:hover {
+  background-color: #2a5a8a;
+  color: #fff;
+}
+
 .dropdown-item.disabled {
+  opacity: 0.45;
   cursor: default;
-  opacity: 0.6;
 }
 
 .dropdown-label {
@@ -79,23 +118,129 @@
 }
 
 .dropdown-shortcut {
-  margin-left: 24px;
   font-size: 11px;
-  color: #858585;
-  font-family: 'Courier New', monospace;
+  color: #888;
+  font-family: 'Consolas', 'Courier New', monospace;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.dropdown-item.clickable:hover .dropdown-shortcut {
+  color: rgba(255,255,255,0.6);
 }
 
 .dropdown-divider {
   height: 1px;
-  background-color: #454545;
-  margin: 4px 8px;
+  background-color: #333;
+  margin: 3px 0;
 }
 
-/* Hover efekti için animasyon */
-.navbar-dropdown {
-  animation: dropdown-appear 0.1s ease-out;
+/* ─── ORTA BÖLÜM ─── */
+.navbar-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
 }
 
+.navbar-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background-color: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  max-width: 320px;
+  width: 100%;
+  transition: background-color 0.15s, border-color 0.15s;
+  color: #888;
+  font-size: 12px;
+}
+
+.navbar-search:hover {
+  background-color: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.15);
+  color: #ccc;
+}
+
+.navbar-search-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+.navbar-search-shortcut {
+  font-size: 10px;
+  color: #666;
+  background: rgba(255,255,255,0.06);
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  font-family: 'Consolas', monospace;
+}
+
+/* ─── SAĞ BÖLÜM ─── */
+.navbar-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  flex-shrink: 0;
+}
+
+.navbar-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color 0.1s, color 0.1s;
+  flex-shrink: 0;
+}
+
+.navbar-action-btn:hover {
+  background-color: rgba(255,255,255,0.1);
+  color: #ccc;
+}
+
+.navbar-action-btn.active {
+  color: #cccccc;
+  background-color: rgba(255,255,255,0.08);
+}
+
+.navbar-action-btn.ai-btn {
+  color: #c586c0;
+}
+
+.navbar-action-btn.ai-btn:hover {
+  background-color: rgba(197, 134, 192, 0.15);
+  color: #c586c0;
+}
+
+.navbar-action-btn.ai-btn.active {
+  color: #c586c0;
+  background-color: rgba(197, 134, 192, 0.12);
+}
+
+.navbar-separator {
+  width: 1px;
+  height: 16px;
+  background-color: #3a3a3a;
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+/* ─── ANİMASYON ─── */
 @keyframes dropdown-appear {
   from {
     opacity: 0;

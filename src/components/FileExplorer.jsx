@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Edit3, Trash2 } from 'lucide-react';
+import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Edit3, Trash2, FilePlus, FolderPlus } from 'lucide-react';
 import { apiReadFile } from '../utils/fileApi';
 import './FileExplorer.css';
 
-const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete, currentDirPath }) => {
+const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete, onNewFile, onNewFolder, currentDirPath }) => {
   const [expanded, setExpanded] = useState(new Set());
   const [fileStructure, setFileStructure] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null); // Seçili dosya/klasör
@@ -169,7 +169,21 @@ const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete
   if (!fileStructure) {
     return (
       <div className="file-explorer-container">
-        <div className="file-explorer-header">EXPLORER</div>
+        <div className="file-explorer-header">
+          <span>EXPLORER</span>
+          <div className="explorer-header-actions">
+            {onNewFile && (
+              <button className="explorer-action-btn" onClick={onNewFile} title="Yeni Dosya">
+                <FilePlus size={14} />
+              </button>
+            )}
+            {onNewFolder && (
+              <button className="explorer-action-btn" onClick={onNewFolder} title="Yeni Klasör">
+                <FolderPlus size={14} />
+              </button>
+            )}
+          </div>
+        </div>
         <div className="explorer-empty">
           <p>Henüz klasör açılmadı.</p>
           <p><strong>File → Klasör Aç</strong> ile başlayın.</p>
@@ -181,8 +195,26 @@ const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete
   return (
     <div className="file-explorer-container">
       <div className="file-explorer-header">
-        <span>EXPLORER — {fileStructure.name}</span>
+        <span className="explorer-title">{fileStructure.name.toUpperCase()}</span>
         <div className="explorer-header-actions">
+          {onNewFile && (
+            <button
+              className="explorer-action-btn"
+              onClick={onNewFile}
+              title="Yeni Dosya"
+            >
+              <FilePlus size={14} />
+            </button>
+          )}
+          {onNewFolder && (
+            <button
+              className="explorer-action-btn"
+              onClick={onNewFolder}
+              title="Yeni Klasör"
+            >
+              <FolderPlus size={14} />
+            </button>
+          )}
           {selectedNode && onRename && (
             <button
               className="explorer-action-btn"

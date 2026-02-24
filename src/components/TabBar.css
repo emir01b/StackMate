@@ -1,8 +1,8 @@
 .tab-bar {
   display: flex;
   flex-direction: row;
-  background-color: #1e1e1e;
-  border-bottom: 1px solid #333;
+  background-color: #181818;
+  border-bottom: 1px solid #252525;
   overflow-x: auto;
   flex-shrink: 0;
   scrollbar-width: none;
@@ -15,22 +15,25 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 10px;
   min-width: 100px;
   max-width: 200px;
   height: 35px;
   cursor: pointer;
-  border-right: 1px solid #333;
-  background-color: #2d2d2d;
-  color: #969696;
-  font-size: 13px;
+  border-right: 1px solid #252525;
+  background-color: #252525;
+  color: #888;
+  font-size: 12px;
   user-select: none;
   flex-shrink: 0;
   position: relative;
-  transition: background-color 0.1s;
+  transition: background-color 0.1s, color 0.1s;
 }
 
-.tab:hover { background-color: #2a2d2e; color: #cccccc; }
+.tab:hover {
+  background-color: #2a2a2a;
+  color: #cccccc;
+}
 
 .tab.active {
   background-color: #1e1e1e;
@@ -43,6 +46,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
 }
 
 .tab-dot {
@@ -57,7 +61,7 @@
   justify-content: center;
   background: none;
   border: none;
-  color: #969696;
+  color: #888;
   cursor: pointer;
   padding: 2px;
   border-radius: 3px;
@@ -70,6 +74,6 @@
 .tab.active .tab-close { opacity: 1; }
 
 .tab-close:hover {
-  background-color: #444;
+  background-color: rgba(255,255,255,0.12);
   color: #fff;
 }
