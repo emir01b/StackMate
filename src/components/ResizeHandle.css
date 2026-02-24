@@ -1,0 +1,54 @@
+.resize-handle {
+  position: relative;
+  background-color: transparent;
+  z-index: 10;
+  transition: background-color 0.15s;
+}
+
+.resize-handle:hover {
+  background-color: rgba(0, 122, 204, 0.3);
+}
+
+.resize-handle:active {
+  background-color: rgba(0, 122, 204, 0.5);
+}
+
+/* Yatay resize (sol/sağ) */
+.resize-handle-horizontal {
+  width: 4px;
+  cursor: ew-resize;
+  flex-shrink: 0;
+}
+
+.resize-handle-horizontal:hover {
+  width: 6px;
+  margin-left: -1px;
+  margin-right: -1px;
+}
+
+/* Dikey resize (yukarı/aşağı) */
+.resize-handle-vertical {
+  height: 4px;
+  cursor: ns-resize;
+  flex-shrink: 0;
+  width: 100%;
+  background-color: transparent;
+}
+
+.resize-handle-vertical:hover {
+  height: 6px;
+  margin-top: -1px;
+  margin-bottom: -1px;
+  background-color: rgba(0, 122, 204, 0.4);
+}
+
+/* Resize sırasında görsel feedback */
+body.resizing {
+  cursor: ew-resize !important;
+  user-select: none !important;
+}
+
+body.resizing-vertical {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
