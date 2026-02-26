@@ -80,12 +80,12 @@
 
 .clear-chat-btn:hover {
   color: #f48771;
-  background-color: rgba(244,135,113,0.1);
+  background-color: rgba(244, 135, 113, 0.1);
 }
 
 /* Bağlantı uyarısı */
 .connection-warning {
-  background-color: rgba(90,62,40,0.5);
+  background-color: rgba(90, 62, 40, 0.5);
   color: #f5c862;
   padding: 8px 12px;
   font-size: 12px;
@@ -102,7 +102,7 @@
 
 /* Aktif model bilgisi */
 .model-info {
-  background-color: rgba(30,58,47,0.5);
+  background-color: rgba(30, 58, 47, 0.5);
   color: #89d185;
   padding: 6px 12px;
   font-size: 11px;
@@ -110,6 +110,32 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Proje bağlamı toggle butonu */
+.project-context-toggle {
+  background-color: rgba(30, 58, 47, 0.5);
+  padding: 8px 12px;
+  font-size: 11px;
+  border-bottom: 1px solid #2a2a2a;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #cccccc;
+  transition: background-color 0.2s;
+}
+
+.project-context-toggle:hover {
+  background-color: rgba(43, 77, 63, 0.7);
+}
+
+.project-context-toggle input {
+  cursor: pointer;
+}
+
+.project-context-toggle strong {
+  color: #89d185;
 }
 
 .messages-container {
@@ -294,4 +320,51 @@
   height: 12px;
   background-color: white;
   border-radius: 2px;
+}
+
+/* Yüzde Barı / Processing Prompt Bar */
+.processing-prompt-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: #252526;
+  border: 1px solid #3e3e42;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.pp-zero {
+  color: #cccccc;
+  font-family: monospace;
+}
+
+.pp-text {
+  color: #ce9133;
+  /* Turuncu tonu */
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.pp-percent {
+  color: #9cdcfe;
+  /* Açık mavi tonu */
+  font-family: monospace;
+}
+
+.pp-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #555;
+  border-top-color: #569cd6;
+  border-radius: 50%;
+  animation: spinner 1s linear infinite;
+  margin-left: 4px;
+}
+
+@keyframes spinner {
+  to {
+    transform: rotate(360deg);
+  }
 }

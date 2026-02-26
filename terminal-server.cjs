@@ -308,6 +308,85 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ─── API: Dosya Silme (Yapay Zeka veya Client İçin) ────────────────────
+  if (req.method === 'POST' && req.url === '/api/delete-file') {
+    const body = await parseBody(req);
+    const targetPath = body.path;
+    try {
+      if (targetPath && fs.existsSync(targetPath)) {
+        const stats = fs.statSync(targetPath);
+        if (stats.isDirectory()) {
+          fs.rmSync(targetPath, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(targetPath);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } else {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Dosya veya klasör bulunamadı' }));
+      }
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: Proje Bağlamını Çıkar (Yapay Zeka İçin) ────────────────────
+  if (req.method === 'POST' && req.url === '/api/get-project-context') {
+    const body = await parseBody(req);
+    const dirPath = body.path;
+    if (!dirPath || !fs.existsSync(dirPath)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Proje yolu bulunamadı' }));
+      return;
+    }
+    try {
+      let combined = '';
+      const ignoreDirs = ['.git', 'node_modules', 'dist', 'build', '.next', 'out', 'public', '.vscode'];
+      const ignoreExts = ['.png', '.jpg', '.jpeg', '.gif', '.mp4', '.svg', '.ico', '.zip', '.exe', '.dll', '.pdf', '.woff', '.ttf', '.eot', '.log', '.lock'];
+
+      const walk = (d) => {
+        if (combined.length > 50000) return; // ~50k karakter sınırı (model çökmesin diye)
+        const entries = fs.readdirSync(d, { withFileTypes: true });
+
+        // Tree yapısı oluştur
+        for (const entry of entries) {
+          if (ignoreDirs.includes(entry.name)) continue;
+          const fullPath = path.join(d, entry.name);
+
+          if (entry.isDirectory()) {
+            walk(fullPath);
+          } else {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (ignoreExts.includes(ext)) continue;
+            if (entry.name === 'package-lock.json' || entry.name === 'yarn.lock') continue;
+
+            try {
+              const stat = fs.statSync(fullPath);
+              if (stat.size > 100000) continue; // 100kb+ dosyaları dahil etme
+
+              const content = fs.readFileSync(fullPath, 'utf-8');
+              if (content.indexOf('\x00') !== -1) continue; // İkili dosyaları atla
+
+              const relativePath = path.relative(dirPath, fullPath).replace(/\\/g, '/');
+              combined += `\n\n=== DOSYA: ${relativePath} ===\n${content}\n`;
+            } catch (err) { }
+          }
+        }
+      }
+
+      walk(dirPath);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ context: combined }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // ─── API: LM Studio proxy (CORS bypass) — chat completions ────────
   if (req.method === 'POST' && req.url === '/api/ai-chat') {
     const body = await parseBody(req);

@@ -5,17 +5,23 @@ import './AIPanel.css';
 // Proxy üzerinden LM Studio'ya bağlan (CORS bypass)
 const LM_STUDIO_URL = 'http://localhost:3001/api/ai-chat';
 const LM_STUDIO_MODELS_URL = 'http://localhost:3001/api/ai-models';
+const PROJECT_CONTEXT_URL = 'http://localhost:3001/api/get-project-context';
 
-const AIPanel = () => {
+const AIPanel = ({ currentDirPath, projectName, openTabs, activeTab }) => {
   const [messages, setMessages] = useState([
     { role: 'assistant', content: 'Merhaba! Ben LM Studio üzerinden çalışan yapay zeka asistanınım. Size nasıl yardımcı olabilirim?' }
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [includeProject, setIncludeProject] = useState(false); // Yeni: Proje bağlamı
   const [isConnected, setIsConnected] = useState(null); // null=bilinmiyor, true/false
   const [activeModel, setActiveModel] = useState(null); // Otomatik algılanan model
+  const [isProcessingPrompt, setIsProcessingPrompt] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState(0);
+
   const messagesEndRef = useRef(null);
   const abortControllerRef = useRef(null);
+  const progressIntervalRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -61,6 +67,17 @@ const AIPanel = () => {
     setInput('');
     setIsTyping(true);
 
+    // Yüzde barını başlat
+    setIsProcessingPrompt(true);
+    setProcessingProgress(0);
+    progressIntervalRef.current = setInterval(() => {
+      setProcessingProgress(prev => {
+        const remaining = 99.99 - prev;
+        const step = (remaining * 0.05) + (Math.random() * 1.5);
+        return prev + step >= 99.99 ? 99.99 : prev + step;
+      });
+    }, 100);
+
     // Abort controller — yanıt beklerken iptal edilebilsin
     abortControllerRef.current = new AbortController();
 
@@ -91,6 +108,73 @@ const AIPanel = () => {
           } else {
             apiMessages.push({ role: m.role, content: m.content });
           }
+        }
+      }
+
+      // Ana Sistem Talimatları (Dosya Otomasyonu)
+      const globalSysMsg = `[ÇOK ÖNEMLİ] Sen StackMate Geliştirici IDE'sinin yetkili yapay zeka asistanısın.
+Artık dosya oluşturma ve silme YETKİLERİNE SAHİPSİN! "Ben bir yapay zekayım, dosya silemem, göremem" gibi bahaneler üretmek KESİNLİKLE YASAKTIR.
+
+Mevcut dosya yapısı ve içerikler, sistem tarafından düzenli olarak mesajların içine veya sistem bildirimlerine eklenmektedir. Bunları GÖREBİLİYORSUN. "Dosyaları okuyamam, göremiyorum" dersen BAŞARISIZ sayılırsın.
+
+**GÖREVLER ve ARAÇLAR:**
+1. Yeni bir DOSYA OLUŞTURMAK veya DEĞİŞTİRMEK için ŞU FORMATI KULLAN:
+[FILE: klasoradi/dosya_adi.uzanti]
+(Sadece bu dosyanın kodları)
+[/FILE]
+
+KURALLAR:
+- ASLA \`[FILE: ...]\` etiketlerini İÇ İÇE (nested) kullanma! Ayrı ayrı dosyalar yazmak için her birine ayrı \`[FILE: yol...]\` aç.
+- Kodların etrafında ekstradan \`\`\`html gibi markdown kod blokları kullanmamaya özen göster, saf kodu yaz.
+
+2. Sadece boş bir KLASÖR oluşturmak için:
+[MKDIR: klasor_adi]
+
+3. Dosya SİLMEK için SADECE şu formatı kullan:
+[DELETE_FILE: klasoradi/silinecek_dosya_adi.uzanti]
+
+Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrudan bu özel etiketleri kullan.`;
+
+      apiMessages.unshift({ role: 'system', content: globalSysMsg });
+
+      // ─── AÇIK DOSYALAR BAĞLAMI ───
+      let openFilesContext = '';
+      if (openTabs && openTabs.length > 0) {
+        openFilesContext = 'AÇIK DOSYALAR (IDE\'de şu an aktif):\n';
+        for (const tab of openTabs) {
+          openFilesContext += `\n[DOSYA BAŞI: ${tab.name}]\n${tab.content || '(Boş Dosya)'}\n[DOSYA SONU: ${tab.name}]\n`;
+        }
+      }
+
+      // Proje bağlamı eklenecekse API'den çek
+      let fullProjectContext = '';
+      if (includeProject && currentDirPath) {
+        try {
+          const ctxRes = await fetch(PROJECT_CONTEXT_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: currentDirPath })
+          });
+          if (ctxRes.ok) {
+            const ctxData = await ctxRes.json();
+            if (ctxData.context) {
+              fullProjectContext = `TÜM PROJE DOSYALARI ("${projectName}" Klasörü):\n${ctxData.context}`;
+            }
+          }
+        } catch (ctxErr) {
+          console.warn("Proje bağlamı çekilemedi:", ctxErr);
+        }
+      }
+
+      // Bağlamı açıkça son mesaja veya görünür bir yere enjekte et
+      if (openFilesContext || fullProjectContext) {
+        // Model sistem mesajlarını atlayabileceğinden dolayı direkt en son YENI mesajın üstüne (veya sistem notu olarak) gömüyoruz.
+        const systemContextInjection = `\n\n=== IDE SİSTEM BİLGİSİ (YAPAY ZEKA ASİSTANININ GÖZÜ) ===\n${openFilesContext}\n${fullProjectContext}\n====================\n\nYukarıdaki dosya bilgilerine görebilirsin. Kullanıcının sorusuna bu dosya kaynaklarını referans alarak cevap ver. Dosya yok, göremiyorum deme.`;
+
+        // apiMessages'daki orijinal user mesajını güvenilir bir "system" veya "user" injectiyle güncelle.
+        const lastMsgIndex = apiMessages.length - 1;
+        if (lastMsgIndex >= 0 && apiMessages[lastMsgIndex].role === 'user') {
+          apiMessages[lastMsgIndex].content = apiMessages[lastMsgIndex].content + systemContextInjection;
         }
       }
 
@@ -125,8 +209,18 @@ const AIPanel = () => {
       // Boş asistan mesajı ekle (streaming için)
       setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
 
+      let isFirstChunk = true;
+
       while (true) {
         const { done, value } = await reader.read();
+
+        if (isFirstChunk) {
+          isFirstChunk = false;
+          setIsProcessingPrompt(false);
+          clearInterval(progressIntervalRef.current);
+          setProcessingProgress(100);
+        }
+
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
@@ -168,6 +262,85 @@ const AIPanel = () => {
           return newMsgs;
         });
       }
+
+      // ─── OTOMATİK DOSYA YAZMA ALGORİTMASI ───
+      // "(?:(?!\[\s*FILE:)[\s\S])*?" diyerek, eğer içeride yanlışlıkla başka bir [FILE: açılırsa (nested)
+      // önceki etiketi iptal edip en içteki geçerli olanı alıyoruz.
+      const fileRegex = /\[\s*FILE:\s*([^\]]+?)\s*\]((?:(?!\[\s*FILE:)[\s\S])*?)\[\s*\/\s*FILE\s*\]/g;
+      let match;
+      while ((match = fileRegex.exec(assistantContent)) !== null) {
+        const fileName = match[1].trim();
+        let fileContent = match[2].trim();
+
+        // Yapay zekanın markdown eklerini (**, ```html vb.) temizle
+        const mdBlockRegex = /^(?:\*+|\s)*```[a-zA-Z]*\n([\s\S]*?)\n```(?:\*+|\s)*$/;
+        const mdMatch = fileContent.match(mdBlockRegex);
+        if (mdMatch) {
+          fileContent = mdMatch[1];
+        } else {
+          // Baştaki veya sondaki artık işaretleri temizle
+          fileContent = fileContent.replace(/^(?:\*+|\s)*```[a-zA-Z]*\n?/i, '');
+          fileContent = fileContent.replace(/\n?```(?:\*+|\s)*$/i, '');
+        }
+        fileContent = fileContent.trim();
+
+        if (currentDirPath) {
+          try {
+            await fetch('http://localhost:3001/api/save-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                path: currentDirPath + '\\' + fileName.replace(/\//g, '\\'),
+                content: fileContent
+              })
+            });
+          } catch (err) {
+            console.warn("Otomatik dosya oluşturma hatası:", err);
+          }
+        }
+      }
+
+      // ─── OTOMATİK DOSYA SİLME ALGORİTMASI ───
+      const deleteRegex = /\[\s*DELETE_FILE:\s*([^]*?)\s*\]/g;
+      let delMatch;
+      while ((delMatch = deleteRegex.exec(assistantContent)) !== null) {
+        const fileName = delMatch[1].trim();
+        if (currentDirPath) {
+          try {
+            await fetch('http://localhost:3001/api/delete-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                path: currentDirPath + '\\' + fileName.replace(/\//g, '\\')
+              })
+            });
+          } catch (err) {
+            console.warn("Otomatik dosya silme hatası:", err);
+          }
+        }
+      }
+
+      // ─── OTOMATİK KLASÖR OLUŞTURMA ALGORİTMASI ───
+      // Yapay zeka bazen markdown içine (```) alabiliyor, boşluk, alt satır ekleyebiliyor...
+      const mkdirRegex = /\[\s*MKDIR:\s*([^]*?)\s*\]/g;
+      let mkdirMatch;
+      while ((mkdirMatch = mkdirRegex.exec(assistantContent)) !== null) {
+        const folderName = mkdirMatch[1].trim();
+        if (currentDirPath) {
+          try {
+            await fetch('http://localhost:3001/api/mkdir', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                path: currentDirPath + '\\' + folderName.replace(/\//g, '\\')
+              })
+            });
+          } catch (err) {
+            console.warn("Otomatik klasör oluşturma hatası:", err);
+          }
+        }
+      }
+
     } catch (err) {
       if (err.name === 'AbortError') {
         // Kullanıcı iptal etti
@@ -184,6 +357,8 @@ const AIPanel = () => {
       }
     } finally {
       setIsTyping(false);
+      setIsProcessingPrompt(false);
+      clearInterval(progressIntervalRef.current);
       abortControllerRef.current = null;
     }
   };
@@ -192,6 +367,8 @@ const AIPanel = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
+    setIsProcessingPrompt(false);
+    clearInterval(progressIntervalRef.current);
   };
 
   const handleClearChat = () => {
@@ -234,6 +411,14 @@ const AIPanel = () => {
         </div>
       )}
 
+      {/* Proje Analiz Toggle */}
+      {projectName && currentDirPath && (
+        <div className="project-context-toggle" onClick={() => setIncludeProject(!includeProject)}>
+          <input type="checkbox" checked={includeProject} readOnly />
+          <span>📁 Proje Analizi: <strong>{projectName}</strong></span>
+        </div>
+      )}
+
       <div className="messages-container">
         {messages.map((message, index) => (
           <div
@@ -261,11 +446,20 @@ const AIPanel = () => {
               <Bot className="avatar-icon" />
             </div>
             <div className="message-bubble assistant-bubble">
-              <div className="typing-indicator">
-                <div className="typing-dot"></div>
-                <div className="typing-dot"></div>
-                <div className="typing-dot"></div>
-              </div>
+              {!isProcessingPrompt ? (
+                <div className="typing-indicator">
+                  <div className="typing-dot"></div>
+                  <div className="typing-dot"></div>
+                  <div className="typing-dot"></div>
+                </div>
+              ) : (
+                <div className="processing-prompt-bar">
+                  <span className="pp-zero">0</span>
+                  <span className="pp-text">PROCESSING PROMPT</span>
+                  <span className="pp-percent">{processingProgress.toFixed(2)}%</span>
+                  <div className="pp-spinner"></div>
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -790,7 +790,12 @@ function App() {
                   className="ai-panel"
                   style={{ width: aiWidth ? `${aiWidth}px` : undefined }}
                 >
-                  <AIPanel />
+                  <AIPanel
+                    currentDirPath={currentDirPath}
+                    projectName={files?.name}
+                    openTabs={openTabs}
+                    activeTab={activeTab}
+                  />
                 </div>
               </>
             )}
