@@ -275,6 +275,35 @@ function App() {
     });
   }, [currentDirHandle, currentDirPath]);
 
+  // ─── ANLIK DOSYA İZLEME (FILE WATCHER via SSE veya POLLING) ───────────────
+  useEffect(() => {
+    let eventSource;
+    let fallbackInterval;
+
+    if (currentDirPath) {
+      // Backend (Node.js) üzerinden süper hızlı anlık izleyici
+      eventSource = new EventSource(`http://localhost:3001/api/fs-watch?path=${encodeURIComponent(currentDirPath)}`);
+      eventSource.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === 'fs-change') {
+            refreshExplorer();
+          }
+        } catch (err) { }
+      };
+    } else if (currentDirHandle) {
+      // Tarayıcı Native File System Api kullananlar için arka planda düzenli tarama (10 saniye)
+      fallbackInterval = setInterval(() => {
+        refreshExplorer();
+      }, 10000);
+    }
+
+    return () => {
+      if (eventSource) eventSource.close();
+      if (fallbackInterval) clearInterval(fallbackInterval);
+    };
+  }, [currentDirPath, currentDirHandle, refreshExplorer]);
+
   // Global Ctrl+S yakalama — tarayıcının kendi kaydet diyaloğunu engelle
   useEffect(() => {
     const handleGlobalSave = (e) => {
@@ -583,7 +612,7 @@ function App() {
     if (!editor) return;
     try {
       editor.getAction(actionId)?.run();
-    } catch (_) {}
+    } catch (_) { }
   }, []);
 
   const handleNewFolderInExplorer = useCallback(async () => {

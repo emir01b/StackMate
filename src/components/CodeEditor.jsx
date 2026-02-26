@@ -88,8 +88,9 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
     if (contentChangeTimerRef.current) clearTimeout(contentChangeTimerRef.current);
     contentChangeTimerRef.current = setTimeout(() => {
       onContentChange?.(value);
-    }, 300);
-  }, [onContentChange]);
+      doSave(); // Otomatik kaydet
+    }, 1000);
+  }, [onContentChange, doSave]);
 
   const handleMount = useCallback((editor, monaco) => {
     editorRef.current = editor;
@@ -120,10 +121,7 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
       <div className="save-toast" ref={saveToastRef} />
       <div className="editor-toolbar">
         <span className="editor-filename">{file.name}</span>
-        <button className="editor-save-btn" onClick={doSave} title="Kaydet (Ctrl+S)">
-          <Save size={14} />
-          <span>Kaydet</span>
-        </button>
+        <span className="editor-auto-save-indicator" style={{ fontSize: '11px', color: '#888', fontStyle: 'italic', marginLeft: 'auto', marginRight: '10px' }}>Otomatik Kaydedilir (veya Ctrl+S)</span>
       </div>
       <div className="editor-wrapper">
         <Editor

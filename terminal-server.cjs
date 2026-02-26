@@ -273,6 +273,41 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ─── API: Dosya İzleme (SSE) ──────────────────────────────────────────
+  if (req.method === 'GET' && req.url.startsWith('/api/fs-watch')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const watchPath = url.searchParams.get('path');
+    if (!watchPath || !fs.existsSync(watchPath)) {
+      res.writeHead(400); res.end(); return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
+    });
+
+    res.write('retry: 1000\n\n');
+    let debounceTimer;
+
+    try {
+      const watcher = fs.watch(watchPath, { recursive: true }, (eventType, filename) => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          res.write(`data: ${JSON.stringify({ type: 'fs-change', eventType, filename })}\n\n`);
+        }, 500);
+      });
+
+      req.on('close', () => {
+        watcher.close();
+      });
+    } catch (err) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+    }
+    return;
+  }
+
   // ─── API: LM Studio proxy (CORS bypass) — chat completions ────────
   if (req.method === 'POST' && req.url === '/api/ai-chat') {
     const body = await parseBody(req);

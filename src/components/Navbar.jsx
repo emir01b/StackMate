@@ -19,7 +19,6 @@ const Navbar = ({ onFileAction, onViewAction, projectName, showExplorer, showTer
       { label: 'Klasör Aç...', shortcut: 'Ctrl+K Ctrl+O', action: 'open-folder' },
       { label: 'Dosya Aç...', shortcut: 'Ctrl+O', action: 'open-file' },
       { divider: true },
-      { label: 'Kaydet', shortcut: 'Ctrl+S', action: 'save-file' },
       { label: 'Farklı Kaydet...', shortcut: 'Ctrl+Shift+S', action: 'save-as' },
       { divider: true },
       { label: 'Çıkış', shortcut: 'Alt+F4' },
@@ -133,10 +132,10 @@ const Navbar = ({ onFileAction, onViewAction, projectName, showExplorer, showTer
       <div className="navbar-left">
         <div className="navbar-logo" title="StackMate Web IDE">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <rect x="1" y="1" width="6" height="6" rx="1" fill="#007acc"/>
-            <rect x="9" y="1" width="6" height="6" rx="1" fill="#007acc" opacity="0.7"/>
-            <rect x="1" y="9" width="6" height="6" rx="1" fill="#007acc" opacity="0.7"/>
-            <rect x="9" y="9" width="6" height="6" rx="1" fill="#007acc" opacity="0.5"/>
+            <rect x="1" y="1" width="6" height="6" rx="1" fill="#007acc" />
+            <rect x="9" y="1" width="6" height="6" rx="1" fill="#007acc" opacity="0.7" />
+            <rect x="1" y="9" width="6" height="6" rx="1" fill="#007acc" opacity="0.7" />
+            <rect x="9" y="9" width="6" height="6" rx="1" fill="#007acc" opacity="0.5" />
           </svg>
         </div>
 
@@ -215,16 +214,7 @@ const Navbar = ({ onFileAction, onViewAction, projectName, showExplorer, showTer
 
         <div className="navbar-separator" />
 
-        {/* Kaydet */}
-        <button
-          className="navbar-action-btn"
-          onClick={() => onFileAction?.('save-file')}
-          title="Kaydet (Ctrl+S)"
-        >
-          <Save size={16} />
-        </button>
 
-        <div className="navbar-separator" />
 
         {/* AI Asistan */}
         <button
