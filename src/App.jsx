@@ -792,9 +792,11 @@ function App() {
                 >
                   <AIPanel
                     currentDirPath={currentDirPath}
+                    currentDirHandle={currentDirHandle}
                     projectName={files?.name}
                     openTabs={openTabs}
                     activeTab={activeTab}
+                    onFileChange={refreshExplorer}
                   />
                 </div>
               </>

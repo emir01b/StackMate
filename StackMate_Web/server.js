@@ -21,6 +21,7 @@ const MIME = {
   '.woff': 'font/woff',
   '.ttf' : 'font/ttf',
   '.txt' : 'text/plain',
+  '.xml' : 'application/xml; charset=utf-8',
 };
 
 const server = http.createServer((req, res) => {
@@ -45,6 +46,13 @@ const server = http.createServer((req, res) => {
   }
 
   if (!fs.existsSync(filePath)) {
+    // robots.txt ve sitemap.xml gibi SEO dosyaları için 404 döndür
+    const seoFiles = ['/robots.txt', '/sitemap.xml'];
+    if (seoFiles.includes(urlPath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+      return;
+    }
     // SPA fallback: tek sayfa → index.html
     filePath = path.join(PUBLIC, 'index.html');
   }

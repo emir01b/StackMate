@@ -1,27 +1,498 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Loader2, Trash2 } from 'lucide-react';
+import { Send, Bot, User, Loader2, Trash2, Copy, Check, X, FileCode, FolderPlus, Terminal as TerminalIcon, Play, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
 import './AIPanel.css';
 
-// Proxy üzerinden LM Studio'ya bağlan (CORS bypass)
 const LM_STUDIO_URL = 'http://localhost:3001/api/ai-chat';
 const LM_STUDIO_MODELS_URL = 'http://localhost:3001/api/ai-models';
 const PROJECT_CONTEXT_URL = 'http://localhost:3001/api/get-project-context';
+const AGENT_EXEC_URL = 'http://localhost:3001/api/agent-exec';
 
-const AIPanel = ({ currentDirPath, projectName, openTabs, activeTab }) => {
+const getLanguageFromPath = (p) => {
+  const ext = (p.split('.').pop() || '').toLowerCase();
+  const map = { js: 'javascript', jsx: 'jsx', ts: 'typescript', tsx: 'tsx', py: 'python', rb: 'ruby', java: 'java', go: 'go', rs: 'rust', html: 'html', css: 'css', scss: 'scss', json: 'json', xml: 'xml', md: 'markdown', yaml: 'yaml', yml: 'yaml', sh: 'bash', bat: 'batch', sql: 'sql', php: 'php', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', vue: 'vue', svelte: 'svelte', cjs: 'javascript', mjs: 'javascript' };
+  return map[ext] || ext || 'code';
+};
+
+const isDangerousCommand = (cmd) => {
+  const lower = cmd.toLowerCase();
+  return [/\brm\s/, /\brmdir\s/, /\bdel\s/, /\bformat\s/, /\brd\s/, /--force/, /\bdrop\s/, /\btruncate\s/, /\bsudo\s/, /\bmkfs/, /\bdd\s/].some(p => p.test(lower));
+};
+
+const fsaaWriteFile = async (dirHandle, relativePath, content) => {
+  const parts = relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
+  const fileName = parts.pop();
+  let dir = dirHandle;
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part, { create: true });
+  }
+  const fileHandle = await dir.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(content);
+  await writable.close();
+};
+
+const fsaaDeleteFile = async (dirHandle, relativePath) => {
+  const parts = relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
+  const fileName = parts.pop();
+  let dir = dirHandle;
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part);
+  }
+  await dir.removeEntry(fileName, { recursive: false });
+};
+
+const fsaaMkdir = async (dirHandle, relativePath) => {
+  const parts = relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
+  let dir = dirHandle;
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part, { create: true });
+  }
+};
+
+const parseMessageParts = (content) => {
+  const segments = [];
+  let remaining = content;
+
+  while (remaining.length > 0) {
+    const candidates = [];
+
+    const codeIdx = remaining.indexOf('```');
+    if (codeIdx !== -1) candidates.push({ type: 'code', index: codeIdx });
+
+    const fileMatch = remaining.match(/\[\s*FILE:\s*([^\]]+?)\s*\]/);
+    if (fileMatch) candidates.push({ type: 'file', index: fileMatch.index, match: fileMatch });
+
+    const delMatch = remaining.match(/\[\s*DELETE_FILE:\s*([^\]]+?)\s*\]/);
+    if (delMatch) candidates.push({ type: 'delete', index: delMatch.index, match: delMatch });
+
+    const mkdirMatch = remaining.match(/\[\s*MKDIR:\s*([^\]]+?)\s*\]/);
+    if (mkdirMatch) candidates.push({ type: 'mkdir', index: mkdirMatch.index, match: mkdirMatch });
+
+    const cmdMatch = remaining.match(/\[\s*CMD:\s*([^\]]+?)\s*\]/);
+    if (cmdMatch) candidates.push({ type: 'cmd', index: cmdMatch.index, match: cmdMatch });
+
+    if (candidates.length === 0) {
+      if (remaining) segments.push({ type: 'text', content: remaining });
+      break;
+    }
+
+    candidates.sort((a, b) => a.index - b.index);
+    const earliest = candidates[0];
+
+    if (earliest.index > 0) {
+      segments.push({ type: 'text', content: remaining.slice(0, earliest.index) });
+    }
+
+    switch (earliest.type) {
+      case 'code': {
+        const afterOpen = remaining.slice(codeIdx + 3);
+        const langEnd = afterOpen.indexOf('\n');
+        const language = langEnd >= 0 ? afterOpen.slice(0, langEnd).trim() : '';
+        const codeStartOffset = langEnd >= 0 ? langEnd + 1 : afterOpen.length;
+        const codeStart = codeIdx + 3 + codeStartOffset;
+        const closeIdx = remaining.indexOf('```', codeStart);
+        if (closeIdx === -1) {
+          segments.push({ type: 'code', language, content: remaining.slice(codeStart), incomplete: true });
+          remaining = '';
+        } else {
+          segments.push({ type: 'code', language, content: remaining.slice(codeStart, closeIdx) });
+          remaining = remaining.slice(closeIdx + 3);
+        }
+        break;
+      }
+      case 'file': {
+        const filePath = earliest.match[1].trim();
+        const afterTag = remaining.slice(earliest.index + earliest.match[0].length);
+        const closeMatch = afterTag.match(/\[\s*\/\s*FILE\s*\]/);
+        if (closeMatch) {
+          let fileContent = afterTag.slice(0, closeMatch.index).trim();
+          const mdBlock = /^```[a-zA-Z]*\n?([\s\S]*?)\n?```$/;
+          const mdM = fileContent.match(mdBlock);
+          if (mdM) fileContent = mdM[1];
+          segments.push({ type: 'file_action', path: filePath, content: fileContent });
+          remaining = afterTag.slice(closeMatch.index + closeMatch[0].length);
+        } else {
+          segments.push({ type: 'file_action', path: filePath, content: afterTag.trim(), incomplete: true });
+          remaining = '';
+        }
+        break;
+      }
+      case 'delete': {
+        segments.push({ type: 'delete_action', path: earliest.match[1].trim() });
+        remaining = remaining.slice(earliest.index + earliest.match[0].length);
+        break;
+      }
+      case 'mkdir': {
+        segments.push({ type: 'mkdir_action', path: earliest.match[1].trim() });
+        remaining = remaining.slice(earliest.index + earliest.match[0].length);
+        break;
+      }
+      case 'cmd': {
+        segments.push({ type: 'terminal_action', command: earliest.match[1].trim() });
+        remaining = remaining.slice(earliest.index + earliest.match[0].length);
+        break;
+      }
+      default:
+        remaining = remaining.slice(1);
+    }
+  }
+  return segments;
+};
+
+const suggestFileName = (language) => {
+  const map = { html: 'index.html', css: 'style.css', javascript: 'script.js', js: 'script.js', python: 'main.py', typescript: 'index.ts', json: 'data.json', jsx: 'App.jsx', tsx: 'App.tsx', php: 'index.php', go: 'main.go', rust: 'main.rs', java: 'Main.java', sql: 'query.sql', bash: 'script.sh', sh: 'script.sh', bat: 'script.bat', yaml: 'config.yaml', yml: 'config.yml', xml: 'data.xml', scss: 'style.scss', vue: 'App.vue', svelte: 'App.svelte', md: 'README.md', markdown: 'README.md' };
+  return map[language] || 'dosya.txt';
+};
+
+const CodeBlock = ({ language, code, incomplete, currentDirPath, currentDirHandle, onFileChange }) => {
+  const [copied, setCopied] = useState(false);
+  const [showSave, setShowSave] = useState(false);
+  const [fileName, setFileName] = useState('');
+  const [saveStatus, setSaveStatus] = useState(null);
+
+  const canSave = !!(currentDirPath || currentDirHandle);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const handleSaveToggle = () => {
+    if (!showSave) setFileName(suggestFileName(language));
+    setShowSave(!showSave);
+    setSaveStatus(null);
+  };
+
+  const handleSaveFile = async () => {
+    if (!fileName.trim() || !canSave) return;
+    setSaveStatus('saving');
+    try {
+      if (currentDirPath) {
+        const fullPath = currentDirPath + '\\' + fileName.trim().replace(/\//g, '\\');
+        const res = await fetch('http://localhost:3001/api/save-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: fullPath, content: code })
+        });
+        if (!res.ok) throw new Error();
+      } else {
+        await fsaaWriteFile(currentDirHandle, fileName.trim(), code);
+      }
+      setSaveStatus('saved');
+      setTimeout(() => onFileChange?.(), 300);
+      setTimeout(() => { setShowSave(false); setSaveStatus(null); }, 2000);
+    } catch {
+      setSaveStatus('error');
+    }
+  };
+
+  const lines = code.split('\n');
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+
+  return (
+    <div className={`code-block${incomplete ? ' code-block-incomplete' : ''}`}>
+      <div className="code-block-header">
+        <span className="code-block-lang">{language || 'code'}</span>
+        <div className="code-header-actions">
+          {canSave && (
+            <button className="code-copy-btn" onClick={handleSaveToggle} title="Dosya olarak kaydet">
+              <FileCode size={12} />
+              <span>Kaydet</span>
+            </button>
+          )}
+          <button className="code-copy-btn" onClick={handleCopy} title="Kopyala">
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+            <span>{copied ? 'Kopyalandı' : 'Kopyala'}</span>
+          </button>
+        </div>
+      </div>
+      {showSave && (
+        <div className="save-file-bar">
+          <FileCode size={12} className="save-file-icon" />
+          <input
+            type="text"
+            value={fileName}
+            onChange={(e) => setFileName(e.target.value)}
+            placeholder="dosya-adi.uzanti"
+            className="save-file-input"
+            onKeyDown={(e) => e.key === 'Enter' && handleSaveFile()}
+          />
+          {saveStatus === 'saved' ? (
+            <span className="save-status saved"><Check size={12} /> Kaydedildi</span>
+          ) : saveStatus === 'error' ? (
+            <span className="save-status error"><AlertTriangle size={12} /> Hata</span>
+          ) : (
+            <button className="save-file-btn" onClick={handleSaveFile} disabled={saveStatus === 'saving'}>
+              {saveStatus === 'saving' ? <Loader2 size={12} className="spin" /> : <Check size={12} />}
+              {saveStatus === 'saving' ? 'Kaydediliyor...' : 'Kaydet'}
+            </button>
+          )}
+          <button className="save-file-cancel" onClick={() => setShowSave(false)}>
+            <X size={12} />
+          </button>
+        </div>
+      )}
+      <div className="code-block-body">
+        {lines.map((line, i) => (
+          <div key={i} className="code-line">
+            <span className="line-number">{i + 1}</span>
+            <span className="line-content">{line || ' '}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const FileActionBlock = ({ path: filePath, content, incomplete, actionId, state, onApprove, onReject }) => {
+  const [collapsed, setCollapsed] = useState(false);
+  const lang = getLanguageFromPath(filePath);
+  const lines = (content || '').split('\n');
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  const status = state?.status || 'pending';
+  const stateClass = status !== 'pending' ? ` state-${status}` : '';
+
+  return (
+    <div className={`action-block file-action${stateClass}`}>
+      <div className="action-block-header">
+        <div className="action-header-info" onClick={() => setCollapsed(!collapsed)} style={{ cursor: 'pointer' }}>
+          {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+          <FileCode size={14} />
+          <span className="action-path">{filePath}</span>
+          <span className="action-lang">{lang}</span>
+        </div>
+        {!incomplete && status === 'pending' && (
+          <div className="action-buttons">
+            <button className="action-btn approve" onClick={() => onApprove(actionId, { type: 'file_action', path: filePath, content })}>
+              <Check size={12} /> Uygula
+            </button>
+            <button className="action-btn reject" onClick={() => onReject(actionId)}>
+              <X size={12} /> Reddet
+            </button>
+          </div>
+        )}
+        {status === 'running' && <span className="action-status running"><Loader2 size={12} className="spin" /> Uygulanıyor...</span>}
+        {status === 'done' && <span className="action-status done"><Check size={12} /> Uygulandı</span>}
+        {status === 'rejected' && <span className="action-status rejected">Reddedildi</span>}
+        {status === 'error' && <span className="action-status error"><AlertTriangle size={12} /> {state.error}</span>}
+      </div>
+      {!collapsed && content && (
+        <div className="code-block-body file-code-preview">
+          {lines.map((line, i) => (
+            <div key={i} className="code-line">
+              <span className="line-number">{i + 1}</span>
+              <span className="line-content">{line || ' '}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const DeleteActionBlock = ({ path: filePath, actionId, state, onApprove, onReject }) => {
+  const status = state?.status || 'pending';
+  const stateClass = status !== 'pending' ? ` state-${status}` : '';
+
+  return (
+    <div className={`action-block delete-action${stateClass}`}>
+      <div className="action-block-header">
+        <div className="action-header-info">
+          <Trash2 size={14} />
+          <span className="action-path">{filePath}</span>
+          <span className="action-label danger-label">Silme</span>
+        </div>
+        {status === 'pending' && (
+          <div className="action-buttons">
+            <button className="action-btn approve danger" onClick={() => onApprove(actionId, { type: 'delete_action', path: filePath })}>
+              <Trash2 size={12} /> Sil
+            </button>
+            <button className="action-btn reject" onClick={() => onReject(actionId)}>
+              <X size={12} /> İptal
+            </button>
+          </div>
+        )}
+        {status === 'running' && <span className="action-status running"><Loader2 size={12} className="spin" /> Siliniyor...</span>}
+        {status === 'done' && <span className="action-status done"><Check size={12} /> Silindi</span>}
+        {status === 'rejected' && <span className="action-status rejected">İptal edildi</span>}
+        {status === 'error' && <span className="action-status error"><AlertTriangle size={12} /> {state.error}</span>}
+      </div>
+    </div>
+  );
+};
+
+const MkdirActionBlock = ({ path: dirPath, actionId, state }) => {
+  const status = state?.status || 'pending';
+  const stateClass = status !== 'pending' ? ` state-${status}` : '';
+
+  return (
+    <div className={`action-block mkdir-action${stateClass}`}>
+      <div className="action-block-header">
+        <div className="action-header-info">
+          <FolderPlus size={14} />
+          <span className="action-path">{dirPath}</span>
+        </div>
+        {status === 'running' && <span className="action-status running"><Loader2 size={12} className="spin" /> Oluşturuluyor...</span>}
+        {status === 'done' && <span className="action-status done"><Check size={12} /> Oluşturuldu</span>}
+        {status === 'error' && <span className="action-status error"><AlertTriangle size={12} /> Hata</span>}
+      </div>
+    </div>
+  );
+};
+
+const TerminalActionBlock = ({ command, actionId, state, onApprove, onReject, onContinue }) => {
+  const status = state?.status || 'pending';
+  const dangerous = isDangerousCommand(command);
+  const stateClass = status !== 'pending' ? ` state-${status}` : '';
+  const result = state?.result;
+  const continued = state?.continued;
+  const hasOutput = result && (result.stdout || result.stderr);
+  const isSuccess = result?.exitCode === 0;
+
+  return (
+    <div className={`terminal-block${dangerous ? ' terminal-dangerous' : ''}${stateClass}`}>
+      <div className="terminal-block-header">
+        <div className="terminal-header-left">
+          <TerminalIcon size={13} />
+          <span className="terminal-header-title">Terminal</span>
+          {status === 'running' && <Loader2 size={12} className="spin terminal-header-spinner" />}
+          {status === 'done' && isSuccess && <Check size={12} className="terminal-header-success" />}
+          {status === 'done' && !isSuccess && <AlertTriangle size={12} className="terminal-header-error" />}
+          {status === 'error' && <AlertTriangle size={12} className="terminal-header-error" />}
+        </div>
+        <div className="terminal-header-right">
+          {status === 'pending' && (
+            <div className="terminal-header-actions">
+              <button className="terminal-run-btn" onClick={() => onApprove(actionId, { type: 'terminal_action', command })}>
+                <Play size={11} /> Çalıştır
+              </button>
+              <button className="terminal-skip-btn" onClick={() => onReject(actionId)}>
+                <X size={11} /> Atla
+              </button>
+            </div>
+          )}
+          {status === 'rejected' && <span className="terminal-status-badge skipped">Atlandı</span>}
+          {status === 'error' && <span className="terminal-status-badge errored">{state.error}</span>}
+        </div>
+      </div>
+
+      {dangerous && status === 'pending' && (
+        <div className="terminal-warning-bar">
+          <AlertTriangle size={12} /> Bu komut tehlikeli olabilir. Çalıştırmadan önce kontrol edin.
+        </div>
+      )}
+
+      <div className="terminal-body">
+        <div className="terminal-prompt-line">
+          <span className="terminal-prompt-symbol">❯</span>
+          <span className="terminal-prompt-cmd">{command}</span>
+        </div>
+
+        {status === 'running' && (
+          <div className="terminal-running-indicator">
+            <Loader2 size={14} className="spin" />
+            <span>Komut çalışıyor...</span>
+          </div>
+        )}
+
+        {hasOutput && (
+          <div className="terminal-output-area">
+            {result.stdout && <pre className="terminal-stdout">{result.stdout}</pre>}
+            {result.stderr && <pre className="terminal-stderr">{result.stderr}</pre>}
+          </div>
+        )}
+
+        {result && (
+          <div className={`terminal-exitcode-line ${isSuccess ? 'exit-success' : 'exit-failure'}`}>
+            <span>Process exited with code {result.exitCode}</span>
+          </div>
+        )}
+      </div>
+
+      {status === 'done' && !continued && (
+        <div className="terminal-continue-bar">
+          <button className="terminal-continue-btn" onClick={() => onContinue(actionId, result, true)}>
+            <Check size={12} /> Devam Et
+          </button>
+          <button className="terminal-error-btn" onClick={() => onContinue(actionId, result, false)}>
+            <AlertTriangle size={12} /> Hatayı Bildir
+          </button>
+        </div>
+      )}
+      {continued && (
+        <div className="terminal-continued-badge">
+          <Check size={11} /> {continued === 'continue' ? 'Devam edildi' : 'Hata bildirildi'}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const renderInlineText = (text) => {
+  if (!text) return null;
+  const regex = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+  const parts = [];
+  let lastIndex = 0;
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    if (m.index > lastIndex) parts.push(text.slice(lastIndex, m.index));
+    const raw = m[0];
+    if (raw.startsWith('`')) {
+      parts.push(<code className="inline-code" key={m.index}>{raw.slice(1, -1)}</code>);
+    } else {
+      parts.push(<strong key={m.index}>{raw.slice(2, -2)}</strong>);
+    }
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+  return parts.length > 0 ? parts : text;
+};
+
+const MessageContent = ({ content, messageIndex, actionStates, onApprove, onReject, onContinue, currentDirPath, currentDirHandle, onFileChange }) => {
+  const parts = parseMessageParts(content);
+  return (
+    <div className="message-content">
+      {parts.map((part, i) => {
+        const actionId = `msg-${messageIndex}-part-${i}`;
+        const state = actionStates?.[actionId];
+        switch (part.type) {
+          case 'code':
+            return <CodeBlock key={i} language={part.language} code={part.content} incomplete={part.incomplete} currentDirPath={currentDirPath} currentDirHandle={currentDirHandle} onFileChange={onFileChange} />;
+          case 'file_action':
+            return <FileActionBlock key={i} path={part.path} content={part.content} incomplete={part.incomplete} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} />;
+          case 'delete_action':
+            return <DeleteActionBlock key={i} path={part.path} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} />;
+          case 'mkdir_action':
+            return <MkdirActionBlock key={i} path={part.path} actionId={actionId} state={state} />;
+          case 'terminal_action':
+            return <TerminalActionBlock key={i} command={part.command} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} onContinue={onContinue} />;
+          default:
+            return <span key={i} className="message-text">{renderInlineText(part.content)}</span>;
+        }
+      })}
+    </div>
+  );
+};
+
+const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, activeTab, onFileChange }) => {
   const [messages, setMessages] = useState([
-    { role: 'assistant', content: 'Merhaba! Ben LM Studio üzerinden çalışan yapay zeka asistanınım. Size nasıl yardımcı olabilirim?' }
+    { role: 'assistant', content: 'Merhaba! Ben StackMate AI asistanınım. Dosya oluşturma, silme ve terminal komutları çalıştırma yetkilerim var. Size nasıl yardımcı olabilirim?' }
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [includeProject, setIncludeProject] = useState(false); // Yeni: Proje bağlamı
-  const [isConnected, setIsConnected] = useState(null); // null=bilinmiyor, true/false
-  const [activeModel, setActiveModel] = useState(null); // Otomatik algılanan model
+  const [includeProject, setIncludeProject] = useState(false);
+  const [isConnected, setIsConnected] = useState(null);
+  const [activeModel, setActiveModel] = useState(null);
   const [isProcessingPrompt, setIsProcessingPrompt] = useState(false);
   const [processingProgress, setProcessingProgress] = useState(0);
+  const [actionStates, setActionStates] = useState({});
 
   const messagesEndRef = useRef(null);
   const abortControllerRef = useRef(null);
   const progressIntervalRef = useRef(null);
+  const autoTriggeredRef = useRef(new Set());
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -29,9 +500,8 @@ const AIPanel = ({ currentDirPath, projectName, openTabs, activeTab }) => {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, actionStates]);
 
-  // Bağlantı kontrolü + aktif model algılama
   useEffect(() => {
     const checkConnection = async () => {
       try {
@@ -39,7 +509,6 @@ const AIPanel = ({ currentDirPath, projectName, openTabs, activeTab }) => {
         if (res.ok) {
           const data = await res.json();
           setIsConnected(true);
-          // LM Studio'da yüklü ilk modeli kullan
           if (data.data && data.data.length > 0) {
             setActiveModel(data.data[0].id);
           }
@@ -53,21 +522,148 @@ const AIPanel = ({ currentDirPath, projectName, openTabs, activeTab }) => {
       }
     };
     checkConnection();
-    // Her 10 saniyede bir kontrol et (model değişirse yakalar)
     const interval = setInterval(checkConnection, 10000);
     return () => clearInterval(interval);
   }, []);
 
-  const handleSend = async () => {
-    if (!input.trim() || isTyping) return;
+  const handleActionApprove = async (actionId, action) => {
+    setActionStates(prev => ({ ...prev, [actionId]: { status: 'running' } }));
+    try {
+      const useBackend = !!currentDirPath;
+      const useHandle = !useBackend && !!currentDirHandle;
 
-    const userMessage = { role: 'user', content: input };
+      if (!useBackend && !useHandle && action.type !== 'terminal_action') {
+        throw new Error('Klasör açılmamış — lütfen önce bir proje klasörü açın.');
+      }
+
+      switch (action.type) {
+        case 'file_action': {
+          if (useBackend) {
+            const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
+            const res = await fetch('http://localhost:3001/api/save-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: fullPath, content: action.content })
+            });
+            if (!res.ok) throw new Error('Dosya kaydedilemedi');
+          } else {
+            await fsaaWriteFile(currentDirHandle, action.path, action.content);
+          }
+          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
+          setTimeout(() => onFileChange?.(), 300);
+          break;
+        }
+        case 'delete_action': {
+          if (useBackend) {
+            const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
+            const res = await fetch('http://localhost:3001/api/delete-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: fullPath })
+            });
+            if (!res.ok) throw new Error('Dosya silinemedi');
+          } else {
+            await fsaaDeleteFile(currentDirHandle, action.path);
+          }
+          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
+          setTimeout(() => onFileChange?.(), 300);
+          break;
+        }
+        case 'mkdir_action': {
+          if (useBackend) {
+            const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
+            const res = await fetch('http://localhost:3001/api/mkdir', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: fullPath })
+            });
+            if (!res.ok) throw new Error('Klasör oluşturulamadı');
+          } else {
+            await fsaaMkdir(currentDirHandle, action.path);
+          }
+          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
+          setTimeout(() => onFileChange?.(), 300);
+          break;
+        }
+        case 'terminal_action': {
+          if (!currentDirPath) {
+            throw new Error('Terminal komutları çalıştırmak için backend modu gerekli — klasörü terminal üzerinden açın.');
+          }
+          const res = await fetch(AGENT_EXEC_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: action.command, cwd: currentDirPath })
+          });
+          const result = await res.json();
+          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done', result } }));
+          break;
+        }
+      }
+    } catch (err) {
+      setActionStates(prev => ({ ...prev, [actionId]: { status: 'error', error: err.message } }));
+    }
+  };
+
+  const handleActionReject = (actionId) => {
+    setActionStates(prev => ({ ...prev, [actionId]: { status: 'rejected' } }));
+  };
+
+  const sendMessageProgrammatically = useRef(null);
+
+  const handleTerminalContinue = (actionId, result, isSuccess) => {
+    setActionStates(prev => ({
+      ...prev,
+      [actionId]: { ...prev[actionId], continued: isSuccess ? 'continue' : 'error' }
+    }));
+
+    const output = [
+      result?.stdout ? result.stdout.trim() : '',
+      result?.stderr ? result.stderr.trim() : ''
+    ].filter(Boolean).join('\n');
+
+    const truncated = output.length > 2000 ? output.slice(-2000) + '\n...(kısaltıldı)' : output;
+
+    let feedbackMsg;
+    if (isSuccess) {
+      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomut başarıyla tamamlandı, devam edebilirsin.`;
+    } else {
+      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomutta hata var. Lütfen hatayı analiz et ve çözüm öner.`;
+    }
+
+    if (sendMessageProgrammatically.current) {
+      sendMessageProgrammatically.current(feedbackMsg);
+    }
+  };
+
+  // Auto-execute safe actions (mkdir, non-dangerous terminal commands)
+  useEffect(() => {
+    const lastMsg = messages[messages.length - 1];
+    const lastIdx = messages.length - 1;
+    if (!lastMsg || lastMsg.role !== 'assistant' || !currentDirPath) return;
+
+    const parts = parseMessageParts(lastMsg.content);
+    parts.forEach((part, partIdx) => {
+      if (part.incomplete) return;
+      const actionId = `msg-${lastIdx}-part-${partIdx}`;
+      if (autoTriggeredRef.current.has(actionId)) return;
+
+      if (part.type === 'mkdir_action') {
+        autoTriggeredRef.current.add(actionId);
+        handleActionApprove(actionId, part);
+      }
+    });
+  }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleSend = async (overrideContent) => {
+    const msgContent = overrideContent || input.trim();
+    if (!msgContent || isTyping) return;
+
+    const userMessage = { role: 'user', content: msgContent };
     const updatedMessages = [...messages, userMessage];
     setMessages(updatedMessages);
-    setInput('');
+    if (!overrideContent) setInput('');
     setIsTyping(true);
 
-    // Yüzde barını başlat
     setIsProcessingPrompt(true);
     setProcessingProgress(0);
     progressIntervalRef.current = setInterval(() => {
@@ -78,14 +674,9 @@ const AIPanel = ({ currentDirPath, projectName, openTabs, activeTab }) => {
       });
     }, 100);
 
-    // Abort controller — yanıt beklerken iptal edilebilsin
     abortControllerRef.current = new AbortController();
 
     try {
-      // Mesaj geçmişini API formatına çevir
-      // 1. İlk karşılama mesajını system rolüne çevir
-      // 2. Başarısız yanıtları filtrele
-      // 3. user/assistant dönüşümlü sırasını garanti et
       const apiMessages = [];
       const filtered = updatedMessages.filter(m =>
         !m.content.startsWith('(Yanıt alınamadı)') &&
@@ -96,14 +687,10 @@ const AIPanel = ({ currentDirPath, projectName, openTabs, activeTab }) => {
       for (let i = 0; i < filtered.length; i++) {
         const m = filtered[i];
         if (i === 0 && m.role === 'assistant') {
-          // İlk karşılama mesajını system olarak ekle
           apiMessages.push({ role: 'system', content: m.content });
         } else {
-          // Dönüşümlü sırayı kontrol et
           const lastRole = apiMessages.length > 0 ? apiMessages[apiMessages.length - 1].role : null;
-          // system'den sonra her rol gelebilir, ama user/assistant ardışık olmamalı
           if (lastRole === m.role && m.role !== 'system') {
-            // Aynı rolden ardışık mesaj — birleştir
             apiMessages[apiMessages.length - 1].content += '\n' + m.content;
           } else {
             apiMessages.push({ role: m.role, content: m.content });
@@ -111,33 +698,48 @@ const AIPanel = ({ currentDirPath, projectName, openTabs, activeTab }) => {
         }
       }
 
-      // Ana Sistem Talimatları (Dosya Otomasyonu)
-      const globalSysMsg = `[ÇOK ÖNEMLİ] Sen StackMate Geliştirici IDE'sinin yetkili yapay zeka asistanısın.
-Artık dosya oluşturma ve silme YETKİLERİNE SAHİPSİN! "Ben bir yapay zekayım, dosya silemem, göremem" gibi bahaneler üretmek KESİNLİKLE YASAKTIR.
+      const globalSysMsg = `Sen StackMate IDE'nin AI agent'ısın. Dosya ve terminal işlemlerini özel etiketlerle yaparsın.
 
-Mevcut dosya yapısı ve içerikler, sistem tarafından düzenli olarak mesajların içine veya sistem bildirimlerine eklenmektedir. Bunları GÖREBİLİYORSUN. "Dosyaları okuyamam, göremiyorum" dersen BAŞARISIZ sayılırsın.
+KRİTİK KURAL: Kod yazdığında ASLA \`\`\`html veya \`\`\`css gibi markdown blokları kullanma! Dosya oluşturmak için HER ZAMAN [FILE: ...][/FILE] etiketlerini kullan.
 
-**GÖREVLER ve ARAÇLAR:**
-1. Yeni bir DOSYA OLUŞTURMAK veya DEĞİŞTİRMEK için ŞU FORMATI KULLAN:
-[FILE: klasoradi/dosya_adi.uzanti]
-(Sadece bu dosyanın kodları)
+ARAÇLAR:
+[FILE: dosya.uzanti]kod buraya[/FILE]  → Dosya oluşturur
+[DELETE_FILE: dosya.uzanti]           → Dosya siler
+[MKDIR: klasor]                       → Klasör oluşturur
+[CMD: komut]                          → Terminal komutu çalıştırır
+
+DOĞRU ÖRNEK:
+Kullanıcı: "bir login sayfası oluştur"
+Yanıt: Login sayfanızı oluşturuyorum:
+[FILE: login.html]
+<!DOCTYPE html>
+<html><head><title>Login</title></head>
+<body><form><input type="text"><button>Giriş</button></form></body>
+</html>
 [/FILE]
+login.html dosyası oluşturuldu.
 
-KURALLAR:
-- ASLA \`[FILE: ...]\` etiketlerini İÇ İÇE (nested) kullanma! Ayrı ayrı dosyalar yazmak için her birine ayrı \`[FILE: yol...]\` aç.
-- Kodların etrafında ekstradan \`\`\`html gibi markdown kod blokları kullanmamaya özen göster, saf kodu yaz.
+YANLIŞ ÖRNEK (ASLA YAPMA):
+\`\`\`html
+<html>...</html>
+\`\`\`
+↑ Bu YANLIŞ! Markdown kod blokları dosya oluşturmaz!
 
-2. Sadece boş bir KLASÖR oluşturmak için:
-[MKDIR: klasor_adi]
+TERMİNAL KURALLARI:
+- Terminal komutu çalıştırmak için [CMD: komut] kullan.
+- BİR MESAJDA SADECE BİR [CMD:] etiketi kullan!
+- Komut çalıştırdıktan sonra DUR ve kullanıcının çıktıyı onaylamasını bekle.
+- Kullanıcı çıktıyı paylaştığında analiz et: başarılıysa sonraki adıma geç, hata varsa çözüm öner.
+- Birden fazla komut gerekiyorsa her birini ayrı adımda çalıştır — hepsini tek seferde yazma.
 
-3. Dosya SİLMEK için SADECE şu formatı kullan:
-[DELETE_FILE: klasoradi/silinecek_dosya_adi.uzanti]
-
-Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrudan bu özel etiketleri kullan.`;
+GENEL KURALLAR:
+- Dosya oluştururken SADECE [FILE: ...][/FILE] kullan, \`\`\`html KULLANMA.
+- Her dosya için ayrı [FILE:] etiketi aç, iç içe kullanma.
+- "Dosya oluşturamam" gibi bahaneler üretme.
+- İşlem sonrası ne yaptığını kısaca açıkla.`;
 
       apiMessages.unshift({ role: 'system', content: globalSysMsg });
 
-      // ─── AÇIK DOSYALAR BAĞLAMI ───
       let openFilesContext = '';
       if (openTabs && openTabs.length > 0) {
         openFilesContext = 'AÇIK DOSYALAR (IDE\'de şu an aktif):\n';
@@ -146,7 +748,6 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
         }
       }
 
-      // Proje bağlamı eklenecekse API'den çek
       let fullProjectContext = '';
       if (includeProject && currentDirPath) {
         try {
@@ -166,12 +767,8 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
         }
       }
 
-      // Bağlamı açıkça son mesaja veya görünür bir yere enjekte et
       if (openFilesContext || fullProjectContext) {
-        // Model sistem mesajlarını atlayabileceğinden dolayı direkt en son YENI mesajın üstüne (veya sistem notu olarak) gömüyoruz.
-        const systemContextInjection = `\n\n=== IDE SİSTEM BİLGİSİ (YAPAY ZEKA ASİSTANININ GÖZÜ) ===\n${openFilesContext}\n${fullProjectContext}\n====================\n\nYukarıdaki dosya bilgilerine görebilirsin. Kullanıcının sorusuna bu dosya kaynaklarını referans alarak cevap ver. Dosya yok, göremiyorum deme.`;
-
-        // apiMessages'daki orijinal user mesajını güvenilir bir "system" veya "user" injectiyle güncelle.
+        const systemContextInjection = `\n\n=== IDE SİSTEM BİLGİSİ ===\n${openFilesContext}\n${fullProjectContext}\n====================\n\nYukarıdaki dosya bilgilerini referans alarak cevap ver.`;
         const lastMsgIndex = apiMessages.length - 1;
         if (lastMsgIndex >= 0 && apiMessages[lastMsgIndex].role === 'user') {
           apiMessages[lastMsgIndex].content = apiMessages[lastMsgIndex].content + systemContextInjection;
@@ -185,7 +782,7 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
           model: activeModel,
           messages: apiMessages,
           temperature: 0.7,
-          max_tokens: 2048,
+          max_tokens: 4096,
           stream: true,
         }),
         signal: abortControllerRef.current.signal,
@@ -201,12 +798,10 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
         throw new Error(errMsg);
       }
 
-      // Streaming yanıt oku
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let assistantContent = '';
 
-      // Boş asistan mesajı ekle (streaming için)
       setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
 
       let isFirstChunk = true;
@@ -235,7 +830,6 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
             const delta = parsed.choices?.[0]?.delta?.content;
             if (delta) {
               assistantContent += delta;
-              // Son mesajı güncelle (streaming)
               setMessages(prev => {
                 const newMsgs = [...prev];
                 newMsgs[newMsgs.length - 1] = {
@@ -251,7 +845,6 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
         }
       }
 
-      // Streaming bitti, eğer içerik boşsa bildir
       if (!assistantContent.trim()) {
         setMessages(prev => {
           const newMsgs = [...prev];
@@ -263,87 +856,8 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
         });
       }
 
-      // ─── OTOMATİK DOSYA YAZMA ALGORİTMASI ───
-      // "(?:(?!\[\s*FILE:)[\s\S])*?" diyerek, eğer içeride yanlışlıkla başka bir [FILE: açılırsa (nested)
-      // önceki etiketi iptal edip en içteki geçerli olanı alıyoruz.
-      const fileRegex = /\[\s*FILE:\s*([^\]]+?)\s*\]((?:(?!\[\s*FILE:)[\s\S])*?)\[\s*\/\s*FILE\s*\]/g;
-      let match;
-      while ((match = fileRegex.exec(assistantContent)) !== null) {
-        const fileName = match[1].trim();
-        let fileContent = match[2].trim();
-
-        // Yapay zekanın markdown eklerini (**, ```html vb.) temizle
-        const mdBlockRegex = /^(?:\*+|\s)*```[a-zA-Z]*\n([\s\S]*?)\n```(?:\*+|\s)*$/;
-        const mdMatch = fileContent.match(mdBlockRegex);
-        if (mdMatch) {
-          fileContent = mdMatch[1];
-        } else {
-          // Baştaki veya sondaki artık işaretleri temizle
-          fileContent = fileContent.replace(/^(?:\*+|\s)*```[a-zA-Z]*\n?/i, '');
-          fileContent = fileContent.replace(/\n?```(?:\*+|\s)*$/i, '');
-        }
-        fileContent = fileContent.trim();
-
-        if (currentDirPath) {
-          try {
-            await fetch('http://localhost:3001/api/save-file', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                path: currentDirPath + '\\' + fileName.replace(/\//g, '\\'),
-                content: fileContent
-              })
-            });
-          } catch (err) {
-            console.warn("Otomatik dosya oluşturma hatası:", err);
-          }
-        }
-      }
-
-      // ─── OTOMATİK DOSYA SİLME ALGORİTMASI ───
-      const deleteRegex = /\[\s*DELETE_FILE:\s*([^]*?)\s*\]/g;
-      let delMatch;
-      while ((delMatch = deleteRegex.exec(assistantContent)) !== null) {
-        const fileName = delMatch[1].trim();
-        if (currentDirPath) {
-          try {
-            await fetch('http://localhost:3001/api/delete-file', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                path: currentDirPath + '\\' + fileName.replace(/\//g, '\\')
-              })
-            });
-          } catch (err) {
-            console.warn("Otomatik dosya silme hatası:", err);
-          }
-        }
-      }
-
-      // ─── OTOMATİK KLASÖR OLUŞTURMA ALGORİTMASI ───
-      // Yapay zeka bazen markdown içine (```) alabiliyor, boşluk, alt satır ekleyebiliyor...
-      const mkdirRegex = /\[\s*MKDIR:\s*([^]*?)\s*\]/g;
-      let mkdirMatch;
-      while ((mkdirMatch = mkdirRegex.exec(assistantContent)) !== null) {
-        const folderName = mkdirMatch[1].trim();
-        if (currentDirPath) {
-          try {
-            await fetch('http://localhost:3001/api/mkdir', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                path: currentDirPath + '\\' + folderName.replace(/\//g, '\\')
-              })
-            });
-          } catch (err) {
-            console.warn("Otomatik klasör oluşturma hatası:", err);
-          }
-        }
-      }
-
     } catch (err) {
       if (err.name === 'AbortError') {
-        // Kullanıcı iptal etti
         setMessages(prev => [...prev, {
           role: 'assistant',
           content: '⚠️ Yanıt iptal edildi.',
@@ -363,6 +877,8 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
     }
   };
 
+  sendMessageProgrammatically.current = handleSend;
+
   const handleStop = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -375,6 +891,8 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
     setMessages([
       { role: 'assistant', content: 'Sohbet temizlendi. Size nasıl yardımcı olabilirim?' }
     ]);
+    setActionStates({});
+    autoTriggeredRef.current.clear();
   };
 
   const handleKeyPress = (e) => {
@@ -389,7 +907,7 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
       <div className="ai-panel-header">
         <div className="ai-header-left">
           <Bot className="header-icon" />
-          <span>AI ASSISTANT</span>
+          <span>StackMate AGENT</span>
           <div className={`connection-dot ${isConnected === true ? 'connected' : isConnected === false ? 'disconnected' : 'checking'}`}
             title={isConnected === true ? `LM Studio bağlı — ${activeModel || 'model yüklü'}` : isConnected === false ? 'LM Studio bağlantısı yok' : 'Kontrol ediliyor...'}
           />
@@ -401,21 +919,20 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
 
       {isConnected === true && activeModel && (
         <div className="model-info">
-          🤖 {activeModel}
+          {activeModel}
         </div>
       )}
 
       {isConnected === false && (
         <div className="connection-warning">
-          ⚠️ LM Studio bağlantısı yok. <code>http://127.0.0.1:1234</code> adresinde çalıştığından emin olun.
+          LM Studio bağlantısı yok. <code>http://127.0.0.1:1234</code> adresinde çalıştığından emin olun.
         </div>
       )}
 
-      {/* Proje Analiz Toggle */}
       {projectName && currentDirPath && (
         <div className="project-context-toggle" onClick={() => setIncludeProject(!includeProject)}>
           <input type="checkbox" checked={includeProject} readOnly />
-          <span>📁 Proje Analizi: <strong>{projectName}</strong></span>
+          <span>Proje Analizi: <strong>{projectName}</strong></span>
         </div>
       )}
 
@@ -425,27 +942,45 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
             key={index}
             className={`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`}
           >
-            {message.role === 'assistant' && (
-              <div className="avatar assistant-avatar">
-                <Bot className="avatar-icon" />
-              </div>
-            )}
-            <div className={`message-bubble ${message.role}-bubble`}>
-              <p style={{ whiteSpace: 'pre-wrap' }}>{message.content}</p>
+            <div className="message-header">
+              {message.role === 'assistant' ? (
+                <>
+                  <Bot size={14} className="message-author-icon" />
+                  <span>{activeModel ? activeModel.split('/').pop() : 'AI'}</span>
+                </>
+              ) : (
+                <>
+                  <span>Sen</span>
+                  <User size={14} className="message-author-icon" />
+                </>
+              )}
             </div>
-            {message.role === 'user' && (
-              <div className="avatar user-avatar">
-                <User className="avatar-icon" />
-              </div>
-            )}
+            <div className="message-body">
+              {message.role === 'assistant' ? (
+                <MessageContent
+                  content={message.content}
+                  messageIndex={index}
+                  actionStates={actionStates}
+                  onApprove={handleActionApprove}
+                  onReject={handleActionReject}
+                  onContinue={handleTerminalContinue}
+                  currentDirPath={currentDirPath}
+                  currentDirHandle={currentDirHandle}
+                  onFileChange={onFileChange}
+                />
+              ) : (
+                <p>{message.content}</p>
+              )}
+            </div>
           </div>
         ))}
         {isTyping && messages[messages.length - 1]?.content === '' && (
           <div className="message assistant-message">
-            <div className="avatar assistant-avatar">
-              <Bot className="avatar-icon" />
+            <div className="message-header">
+              <Bot size={14} className="message-author-icon" />
+              <span>AI</span>
             </div>
-            <div className="message-bubble assistant-bubble">
+            <div className="message-body">
               {!isProcessingPrompt ? (
                 <div className="typing-indicator">
                   <div className="typing-dot"></div>
@@ -467,28 +1002,30 @@ Lütfen "Dosyayı sildim/oluşturdum" gibi fazladan açıklamalar yerine doğrud
       </div>
 
       <div className="input-container">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyPress}
-          placeholder={isConnected === false ? 'LM Studio bağlantısı yok...' : 'Bir soru sorun...'}
-          className="message-input"
-          disabled={isConnected === false}
-        />
-        {isTyping ? (
-          <button onClick={handleStop} className="send-button stop-btn" title="Yanıtı durdur">
-            <div className="stop-icon" />
-          </button>
-        ) : (
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isTyping || isConnected === false}
-            className="send-button"
-          >
-            <Send className="send-icon" />
-          </button>
-        )}
+        <div className="input-wrapper">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyPress}
+            placeholder={isConnected === false ? 'LM Studio bağlantısı yok...' : 'Mesajınızı yazın...'}
+            className="message-input"
+            disabled={isConnected === false}
+          />
+          {isTyping ? (
+            <button onClick={handleStop} className="send-button stop-btn" title="Yanıtı durdur">
+              <div className="stop-icon" />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || isTyping || isConnected === false}
+              className="send-button"
+            >
+              <Send size={14} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

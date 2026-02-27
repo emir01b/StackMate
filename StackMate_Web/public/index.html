@@ -1,17 +1,78 @@
 <!DOCTYPE html>
 <html lang="tr">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="StackMate — Geliştirici araçları yeniden hayal ediliyor. Yakında." />
-  <meta property="og:title" content="StackMate — Yakında" />
-  <meta property="og:description" content="Kod yazma deneyimini yeniden tanımlıyoruz. Mac, Windows ve Linux. Yakında." />
-  <meta property="og:url" content="https://stackmate.space" />
-  <title>StackMate — Yakında</title>
+
+  <!-- SEO: Temel Meta Tag'ler -->
+  <title>StackMate — Yerel AI ile Kod Geliştirme Aracı | Mac, Windows, Linux</title>
+  <meta name="description"
+    content="StackMate — Yerel AI destekli kod editörü. Verileriniz dışarı çıkmaz, kendi makinenizde çalışan yapay zeka ile kod yazın. Mac, Windows ve Linux için yakında." />
+  <meta name="keywords"
+    content="StackMate, kod editörü, yerel AI, geliştirici aracı, IDE, Monaco, code editor, local AI, privacy, Mac, Windows, Linux" />
+  <meta name="author" content="StackMate" />
+  <meta name="robots" content="index, follow" />
+  <link rel="canonical" href="https://stackmate.space/" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon.svg" />
+
+  <!-- SEO: Open Graph (Facebook, LinkedIn, vb.) -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="StackMate" />
+  <meta property="og:title" content="StackMate — Yerel AI ile Kod Geliştirme Aracı" />
+  <meta property="og:description"
+    content="Verileriniz dışarı çıkmaz. Kendi makinenizde çalışan yapay zeka ile kod yazın. Mac, Windows ve Linux için yakında." />
+  <meta property="og:url" content="https://stackmate.space/" />
+  <meta property="og:locale" content="tr_TR" />
+
+  <!-- SEO: Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="StackMate — Yerel AI ile Kod Geliştirme Aracı" />
+  <meta name="twitter:description"
+    content="Verileriniz dışarı çıkmaz. Kendi makinenizde çalışan yapay zeka ile kod yazın. Mac, Windows ve Linux için yakında." />
+
+  <!-- SEO: JSON-LD Yapısal Veri -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "name": "StackMate",
+        "url": "https://stackmate.space/",
+        "description": "Yerel AI destekli kod editörü. Verileriniz dışarı çıkmaz.",
+        "inLanguage": "tr"
+      },
+      {
+        "@type": "Organization",
+        "name": "StackMate",
+        "url": "https://stackmate.space/",
+        "logo": "https://stackmate.space/favicon.svg",
+        "description": "Geliştirici araçları yeniden hayal ediliyor."
+      },
+      {
+        "@type": "SoftwareApplication",
+        "name": "StackMate",
+        "operatingSystem": "macOS, Windows, Linux",
+        "applicationCategory": "DeveloperApplication",
+        "description": "Yerel AI destekli kod editörü ve geliştirme ortamı.",
+        "offers": {
+          "@type": "Offer",
+          "availability": "https://schema.org/PreOrder"
+        }
+      }
+    ]
+  }
+  </script>
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@300;400;500&display=swap"
+    rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
+
 <body>
 
   <canvas id="bg-canvas"></canvas>
@@ -21,14 +82,17 @@
     <div class="nav-inner">
       <a href="#" class="nav-logo">
         <svg class="logo-icon" width="28" height="28" viewBox="0 0 28 28" fill="none">
-          <rect x="2" y="2" width="10" height="10" rx="2" fill="#007acc"/>
-          <rect x="16" y="2" width="10" height="10" rx="2" fill="#007acc" opacity=".7"/>
-          <rect x="2" y="16" width="10" height="10" rx="2" fill="#007acc" opacity=".7"/>
-          <rect x="16" y="16" width="10" height="10" rx="2" fill="#007acc" opacity=".4"/>
+          <rect x="2" y="2" width="10" height="10" rx="2" fill="#007acc" />
+          <rect x="16" y="2" width="10" height="10" rx="2" fill="#007acc" opacity=".7" />
+          <rect x="2" y="16" width="10" height="10" rx="2" fill="#007acc" opacity=".7" />
+          <rect x="16" y="16" width="10" height="10" rx="2" fill="#007acc" opacity=".4" />
         </svg>
         <span>StackMate</span>
       </a>
-      <div class="nav-links">
+      <button class="nav-hamburger" id="nav-hamburger" aria-label="Menü">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="nav-links" id="nav-links">
         <a href="#features">Özellikler</a>
         <a href="#platforms">Platformlar</a>
       </div>
@@ -48,36 +112,43 @@
       </div>
 
       <h1 class="hero-title" data-aos="fade-up" data-aos-delay="100">
-        Yerel AI ile geliştirme.<br/>
+        Yerel AI ile geliştirme.<br />
         <span class="gradient-text">Kodun ve verin sadece sende.</span>
       </h1>
 
       <p class="hero-sub centered" data-aos="fade-up" data-aos-delay="200">
-        Verin dışarı çıkmaz. Kendi makinenizde çalışan yapay zeka ile kod yazın — StackMate yakında Mac, Windows ve Linux için.
+        Verin dışarı çıkmaz. Kendi makinenizde çalışan yapay zeka ile kod yazın — StackMate yakında Mac, Windows ve
+        Linux için.
       </p>
 
       <!-- Geri sayım / teaser badge'leri -->
       <div class="platform-badges" data-aos="fade-up" data-aos-delay="280">
         <div class="pbadge">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 12h8M12 8v8"/></svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="3" />
+            <path d="M8 12h8M12 8v8" />
+          </svg>
           macOS
           <span class="pbadge-tag">Yakında</span>
         </div>
         <div class="pbadge">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="3" width="20" height="14" rx="2" />
+            <path d="M8 21h8M12 17v4" />
+          </svg>
           Windows
           <span class="pbadge-tag">Yakında</span>
         </div>
         <div class="pbadge">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2z"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10A15.3 15.3 0 0 1 12 2z"/></svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2z" />
+            <path
+              d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10A15.3 15.3 0 0 1 12 2z" />
+          </svg>
           Linux
           <span class="pbadge-tag">Yakında</span>
         </div>
-        <div class="pbadge mobile-badge">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1" fill="currentColor"/></svg>
-          iOS & Android
-          <span class="pbadge-tag soon">Yakında</span>
-        </div>
+
       </div>
 
       <!-- Mini stats -->
@@ -88,7 +159,7 @@
         </div>
         <div class="stat-divider"></div>
         <div class="stat">
-          <span class="stat-num" data-count="4">0</span>
+          <span class="stat-num" data-count="3">0</span>
           <span class="stat-label">Platform</span>
         </div>
         <div class="stat-divider"></div>
@@ -104,49 +175,54 @@
   <section class="features" id="features">
     <div class="section-label" data-aos="fade-up">Ne geliyor?</div>
     <h2 class="section-title" data-aos="fade-up" data-aos-delay="100">
-      Geliştirme ortamını<br/>yeniden hayal ettik.
+      Geliştirme ortamını<br />yeniden hayal ettik.
     </h2>
 
     <div class="features-grid">
       <div class="feature-card" data-aos="fade-up">
         <div class="feature-icon">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="16 18 22 12 16 6" />
+            <polyline points="8 6 2 12 8 18" />
+          </svg>
         </div>
         <h3>Güçlü Kod Editörü</h3>
-        <p>VS Code ile aynı editör motoru, sözdizimi renklendirme ve otomatik tamamlama. Masaüstü uygulaması olarak, tam hız.</p>
+        <p>VS Code ile aynı editör motoru, sözdizimi renklendirme ve otomatik tamamlama. Masaüstü uygulaması olarak, tam
+          hız.</p>
         <div class="feature-tag">Monaco Engine</div>
       </div>
 
       <div class="feature-card" data-aos="fade-up">
         <div class="feature-icon purple">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <path d="M3 9h18M9 21V9" />
+          </svg>
         </div>
         <h3>Entegre Terminal</h3>
-        <p>Gerçek shell, doğrudan uygulamanın içinde. Komut geçmişi, tab tamamlama, tam klavye desteği — hem masaüstü hem mobil.</p>
+        <p>Gerçek shell, doğrudan uygulamanın içinde. Komut geçmişi, tab tamamlama, tam klavye desteği.</p>
         <div class="feature-tag purple">Natif Shell</div>
       </div>
 
       <div class="feature-card" data-aos="fade-up">
         <div class="feature-icon pink">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 8v4l3 3" />
+          </svg>
         </div>
         <h3>Yerel AI Asistan</h3>
         <p>Verileriniz dışarı çıkmaz. Kendi makinenizde çalışan yapay zeka ile kod yazın, hata ayıklayın, öğrenin.</p>
         <div class="feature-tag pink">%100 Gizli</div>
       </div>
 
-      <div class="feature-card" data-aos="fade-up">
-        <div class="feature-icon green">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1" fill="currentColor"/></svg>
-        </div>
-        <h3>Mobil Destek</h3>
-        <p>iOS ve Android için optimize edilmiş arayüz. Tablet veya telefon — StackMate her ekran boyutuna uyum sağlar.</p>
-        <div class="feature-tag green">iOS · Android</div>
-      </div>
+
 
       <div class="feature-card" data-aos="fade-up">
         <div class="feature-icon orange">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
         </div>
         <h3>Gerçek Dosya Sistemi</h3>
         <p>Yerel dosyalara tam erişim. Klasör aç, düzenle, kaydet — bulut gerektirmeden, doğrudan diske.</p>
@@ -155,7 +231,9 @@
 
       <div class="feature-card" data-aos="fade-up">
         <div class="feature-icon cyan">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
         </div>
         <h3>Gizlilik Önce</h3>
         <p>Hiçbir kod, hiçbir dosya sunucularımıza gönderilmez. Her şey cihazınızda kalır. Her zaman.</p>
@@ -170,29 +248,25 @@
     <div class="platforms-inner">
       <div class="section-label" data-aos="fade-up">Platformlar</div>
       <h2 class="section-title" data-aos="fade-up">
-        Mac, Windows ve Linux.<br/><span class="gradient-text">StackMate orada.</span>
+        Mac, Windows ve Linux.<br /><span class="gradient-text">StackMate orada.</span>
       </h2>
       <p class="platforms-sub" data-aos="fade-up">
-        Masaüstünde başladığın projeyi ileride mobilde de açabileceksin — iOS ve Android planlanıyor.
+        macOS, Windows ve Linux — en sevdiğin platformda StackMate ile kod yaz.
       </p>
 
       <div class="platform-cards" data-aos="fade-up">
         <div class="pcard desktop">
           <div class="pcard-icon">
-            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
           </div>
           <div class="pcard-title">Masaüstü</div>
           <div class="pcard-sub">macOS · Windows · Linux</div>
           <div class="pcard-status active">Geliştiriliyor</div>
         </div>
-        <div class="pcard mobile">
-          <div class="pcard-icon">
-            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1" fill="currentColor"/></svg>
-          </div>
-          <div class="pcard-title">Mobil</div>
-          <div class="pcard-sub">iOS · Android</div>
-          <div class="pcard-status soon">Planlandı</div>
-        </div>
+
       </div>
 
       <div class="tech-stack" data-aos="fade-up">
@@ -201,7 +275,7 @@
           <span class="tech-pill">Electron</span>
           <span class="tech-pill">React</span>
           <span class="tech-pill">Monaco</span>
-          <span class="tech-pill">Capacitor</span>
+
           <span class="tech-pill">Node.js</span>
         </div>
       </div>
@@ -213,10 +287,10 @@
     <div class="footer-inner">
       <div class="footer-logo">
         <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
-          <rect x="2" y="2" width="10" height="10" rx="2" fill="#007acc"/>
-          <rect x="16" y="2" width="10" height="10" rx="2" fill="#007acc" opacity=".6"/>
-          <rect x="2" y="16" width="10" height="10" rx="2" fill="#007acc" opacity=".6"/>
-          <rect x="16" y="16" width="10" height="10" rx="2" fill="#007acc" opacity=".3"/>
+          <rect x="2" y="2" width="10" height="10" rx="2" fill="#007acc" />
+          <rect x="16" y="2" width="10" height="10" rx="2" fill="#007acc" opacity=".6" />
+          <rect x="2" y="16" width="10" height="10" rx="2" fill="#007acc" opacity=".6" />
+          <rect x="16" y="16" width="10" height="10" rx="2" fill="#007acc" opacity=".3" />
         </svg>
         <span>StackMate</span>
       </div>
@@ -230,4 +304,5 @@
 
   <script src="script.js"></script>
 </body>
+
 </html>

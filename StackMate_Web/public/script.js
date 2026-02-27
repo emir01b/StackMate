@@ -94,6 +94,22 @@
   let ticking = false;
   const check = () => { nav.classList.toggle('scrolled', window.scrollY > 20); ticking = false; };
   window.addEventListener('scroll', () => { if (!ticking) { requestAnimationFrame(check); ticking = true; } });
+
+  // Hamburger toggle
+  const hamburger = document.getElementById('nav-hamburger');
+  const navLinks  = document.getElementById('nav-links');
+  if (hamburger && navLinks) {
+    hamburger.addEventListener('click', () => {
+      hamburger.classList.toggle('active');
+      navLinks.classList.toggle('open');
+    });
+    navLinks.querySelectorAll('a').forEach(a => {
+      a.addEventListener('click', () => {
+        hamburger.classList.remove('active');
+        navLinks.classList.remove('open');
+      });
+    });
+  }
 })();
 
 

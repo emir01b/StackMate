@@ -459,6 +459,38 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ─── API: Agent Komut Çalıştırma ──────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/agent-exec') {
+    const body = await parseBody(req);
+    const { command, cwd: execCwd } = body;
+    if (!command) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'command gerekli' }));
+      return;
+    }
+    const { exec } = require('child_process');
+    const options = {
+      cwd: execCwd || process.cwd(),
+      timeout: 60000,
+      maxBuffer: 1024 * 1024,
+      shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash',
+    };
+    exec(command, options, (error, stdout, stderr) => {
+      let exitCode = 0;
+      if (error) {
+        exitCode = typeof error.code === 'number' ? error.code : 1;
+        if (error.killed) stderr = (stderr || '') + '\n[Komut zaman aşımına uğradı]';
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({
+        exitCode,
+        stdout: (stdout || '').slice(-10000),
+        stderr: (stderr || '').slice(-5000),
+      }));
+    });
+    return;
+  }
+
   res.end('Terminal OK');
 });
 const wss = new WebSocketServer({ server });
