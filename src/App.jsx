@@ -138,6 +138,22 @@ function App() {
         setFiles(structure);
         setCurrentDirHandle(dirHandle);
 
+        // Otomatik olarak klasör yolunu çöz
+        try {
+          const resolveRes = await fetch('http://localhost:3001/api/resolve-folder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: dirHandle.name })
+          });
+          if (resolveRes.ok) {
+            const data = await resolveRes.json();
+            if (data.path) {
+              setCurrentDirPath(data.path);
+              localStorage.setItem('stackmate_project_path', data.path);
+            }
+          }
+        } catch (_) { /* Backend erişilemezse sessizce devam */ }
+
         // Açık dosyaları geri yükle
         const savedHandles = await loadOpenFileHandles();
         const savedActiveTab = await loadActiveTab();
@@ -247,31 +263,37 @@ function App() {
     }
 
     // 2. Açık sekmelerin içeriklerini diskten yenile
+    // 2. Açık sekmelerin içeriklerini diskten yenile
     setOpenTabs(prevTabs => {
-      // Async güncelleme başlat
-      (async () => {
+      // Async state update pattern for React
+      const updateTabs = async (tabs) => {
         const updatedTabs = await Promise.all(
-          prevTabs.map(async (tab) => {
+          tabs.map(async (tab) => {
             try {
               if (tab.handle) {
-                // Native FS — handle ile oku
                 const f = await tab.handle.getFile();
                 const content = await f.text();
                 return { ...tab, content, modified: false };
               } else if (currentDirPath) {
-                // Backend API — sunucudan oku
                 const result = await apiReadFile(currentDirPath + '\\' + tab.name);
                 return { ...tab, content: result.content, modified: false };
               }
             } catch (_) {
-              // Dosya silinmiş/erişilemiyor — mevcut içeriği koru
+              // Hata durumunda (silindiyse vb) eski içeriği koru
             }
             return tab;
           })
         );
-        setOpenTabs(updatedTabs);
-      })();
-      return prevTabs;
+        // We only trigger another render if the contents ACTUALLY changed to avoid loops
+        setOpenTabs(current => {
+          // A simple check to see if contents changed (not perfect but works for this)
+          const changed = updatedTabs.some((uTab, i) => uTab.content !== current[i]?.content);
+          return changed ? updatedTabs : current;
+        });
+      };
+
+      updateTabs(prevTabs);
+      return prevTabs; // Temporary return previous state while async runs
     });
   }, [currentDirHandle, currentDirPath]);
 
@@ -439,6 +461,23 @@ function App() {
             setFiles(structure);
             setCurrentDirHandle(dirHandle);
             await saveDirectoryHandle(dirHandle);
+
+            // Otomatik olarak klasör yolunu çöz (sıfır etkileşim)
+            try {
+              const resolveRes = await fetch('http://localhost:3001/api/resolve-folder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: dirHandle.name })
+              });
+              if (resolveRes.ok) {
+                const data = await resolveRes.json();
+                if (data.path) {
+                  setCurrentDirPath(data.path);
+                  localStorage.setItem('stackmate_project_path', data.path);
+                }
+              }
+            } catch (_) { /* Backend erişilemezse sessizce devam */ }
+
             break; // Başarılı — çık
           } catch (err) {
             if (err.name === 'AbortError') break; // Kullanıcı iptal etti

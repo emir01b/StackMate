@@ -18,6 +18,10 @@ const getShell = () => {
 
 const SHELL = getShell();
 
+// Agent process yönetimi (uzun süren komutlar için)
+const agentProcesses = new Map();
+let agentProcCounter = 1;
+
 // Komutu platforma göre çalıştır
 const spawnCommand = (cmd, cwd) => {
   if (PLATFORM === 'win32') {
@@ -148,6 +152,38 @@ const server = createServer(async (req, res) => {
     try {
       // Üst dizini oluştur (yoksa)
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, content, 'utf-8');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, path: filePath }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: Dosya düzenle (kısmi değişiklik) ──────────────────────────
+  if (req.method === 'POST' && req.url === '/api/edit-file') {
+    const body = await parseBody(req);
+    const { path: filePath, oldText, newText } = body;
+    if (!filePath || oldText === undefined || newText === undefined) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'path, oldText ve newText gerekli' }));
+      return;
+    }
+    try {
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Dosya bulunamadı' }));
+        return;
+      }
+      let content = fs.readFileSync(filePath, 'utf-8');
+      if (!content.includes(oldText)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Eski metin dosyada bulunamadı' }));
+        return;
+      }
+      content = content.replace(oldText, newText);
       fs.writeFileSync(filePath, content, 'utf-8');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, path: filePath }));
@@ -459,6 +495,73 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ─── API: Klasör Yolu Çözümleme (otomatik) ─────────────────────────
+  if (req.method === 'POST' && req.url === '/api/resolve-folder') {
+    const body = await parseBody(req);
+    const folderName = body.name;
+    if (!folderName) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'name gerekli' }));
+      return;
+    }
+
+    // Yaygın konumlarda ara
+    const searchRoots = [
+      HOME,
+      path.join(HOME, 'Desktop'),
+      path.join(HOME, 'Documents'),
+      path.join(HOME, 'Downloads'),
+      path.join(HOME, 'Documents', 'GitHub'),
+      path.join(HOME, 'GitHub'),
+      path.join(HOME, 'Projects'),
+      path.join(HOME, 'repos'),
+      path.join(HOME, 'source'),
+    ];
+
+    let foundPath = null;
+
+    const searchDir = (dir, depth) => {
+      if (foundPath || depth > 3) return;
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+          const full = path.join(dir, entry.name);
+          if (entry.name === folderName) {
+            foundPath = full;
+            return;
+          }
+          if (depth < 3) searchDir(full, depth + 1);
+          if (foundPath) return;
+        }
+      } catch (_) { /* erişim hatası — atla */ }
+    };
+
+    // Önce direkt kontrol (kök dizinlerde)
+    for (const root of searchRoots) {
+      const direct = path.join(root, folderName);
+      try {
+        if (fs.existsSync(direct) && fs.statSync(direct).isDirectory()) {
+          foundPath = direct;
+          break;
+        }
+      } catch (_) { }
+    }
+
+    // Bulunamadıysa derinlemesine ara
+    if (!foundPath) {
+      for (const root of searchRoots) {
+        searchDir(root, 0);
+        if (foundPath) break;
+      }
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ path: foundPath }));
+    return;
+  }
+
   // ─── API: Agent Komut Çalıştırma ──────────────────────────────────
   if (req.method === 'POST' && req.url === '/api/agent-exec') {
     const body = await parseBody(req);
@@ -488,6 +591,88 @@ const server = createServer(async (req, res) => {
         stderr: (stderr || '').slice(-5000),
       }));
     });
+    return;
+  }
+
+  // ─── Agent uzun süren process yönetimi ──────────────────────────────
+
+  // Process başlat — procId döner
+  if (req.method === 'POST' && req.url === '/api/agent-run') {
+    const body = await parseBody(req);
+    const { command, cwd: execCwd } = body;
+    if (!command) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'command gerekli' }));
+      return;
+    }
+
+    const procId = agentProcCounter++;
+    let stdout = '';
+    let stderr = '';
+    let exitCode = null;
+    let running = true;
+
+    const proc = spawnCommand(command, execCwd || process.cwd());
+
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('close', (code) => { exitCode = code ?? 0; running = false; });
+    proc.on('error', (e) => { stderr += '\n' + e.message; running = false; exitCode = 1; });
+
+    agentProcesses.set(procId, {
+      proc,
+      getStdout: () => stdout,
+      getStderr: () => stderr,
+      getExitCode: () => exitCode,
+      isRunning: () => running,
+      startTime: Date.now(),
+    });
+
+    // 5 dakika sonra otomatik temizle (sızıntı önleme)
+    setTimeout(() => {
+      const p = agentProcesses.get(procId);
+      if (p) {
+        try { p.proc.kill('SIGTERM'); } catch (_) { }
+        agentProcesses.delete(procId);
+      }
+    }, 5 * 60 * 1000);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ procId }));
+    return;
+  }
+
+  // Process durumunu sorgula
+  if (req.method === 'POST' && req.url === '/api/agent-status') {
+    const body = await parseBody(req);
+    const { procId } = body;
+    const p = agentProcesses.get(procId);
+    if (!p) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Process bulunamadı' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      running: p.isRunning(),
+      stdout: p.getStdout().slice(-10000),
+      stderr: p.getStderr().slice(-5000),
+      exitCode: p.getExitCode(),
+    }));
+    return;
+  }
+
+  // Process durdur
+  if (req.method === 'POST' && req.url === '/api/agent-kill') {
+    const body = await parseBody(req);
+    const { procId } = body;
+    const p = agentProcesses.get(procId);
+    if (p) {
+      try { p.proc.kill('SIGTERM'); } catch (_) { }
+      agentProcesses.delete(procId);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
 

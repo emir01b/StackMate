@@ -18,6 +18,12 @@ const isDangerousCommand = (cmd) => {
   return [/\brm\s/, /\brmdir\s/, /\bdel\s/, /\bformat\s/, /\brd\s/, /--force/, /\bdrop\s/, /\btruncate\s/, /\bsudo\s/, /\bmkfs/, /\bdd\s/].some(p => p.test(lower));
 };
 
+const isSafeCommand = (cmd) => {
+  const lower = cmd.trim().toLowerCase();
+  // Sadece zararsız, salt okunur veya tehlikesiz komutları otomatik çalıştır
+  return /^(dir|ls|cat|type|echo|mkdir|cd|pwd|whoami)\b/.test(lower) && !isDangerousCommand(cmd);
+};
+
 const fsaaWriteFile = async (dirHandle, relativePath, content) => {
   const parts = relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
   const fileName = parts.pop();
@@ -71,6 +77,13 @@ const parseMessageParts = (content) => {
     const cmdMatch = remaining.match(/\[\s*CMD:\s*([^\]]+?)\s*\]/);
     if (cmdMatch) candidates.push({ type: 'cmd', index: cmdMatch.index, match: cmdMatch });
 
+    const editMatch = remaining.match(/\[\s*EDIT:\s*([^\]]+?)\s*\]/);
+    if (editMatch) candidates.push({ type: 'edit', index: editMatch.index, match: editMatch });
+
+    // Model iç token formatı: <|channel|>commentary to=CMD... veya to=container.exec...
+    const modelCmdMatch = remaining.match(/<\|channel\|>\s*commentary\s+to=(?:CMD|container\.exec)[^<]*(?:<\|constrain\|>\s*json\s*)?<\|message\|>(\{[^}]*\})/);
+    if (modelCmdMatch) candidates.push({ type: 'model_cmd', index: modelCmdMatch.index, match: modelCmdMatch });
+
     if (candidates.length === 0) {
       if (remaining) segments.push({ type: 'text', content: remaining });
       break;
@@ -91,12 +104,19 @@ const parseMessageParts = (content) => {
         const codeStartOffset = langEnd >= 0 ? langEnd + 1 : afterOpen.length;
         const codeStart = codeIdx + 3 + codeStartOffset;
         const closeIdx = remaining.indexOf('```', codeStart);
-        if (closeIdx === -1) {
+
+        if (closeIdx !== -1) {
+          const innerContent = remaining.slice(codeStart, closeIdx);
+          // Eğer AI sihirli bir eylemi kod bloğu içine aldıysa, kod bloğunu erit.
+          if (/\[\s*(?:FILE|EDIT|CMD|MKDIR|DELETE_FILE|OLD|NEW)\s*(?::|\])/i.test(innerContent)) {
+            remaining = remaining.slice(0, codeIdx) + innerContent.trim() + remaining.slice(closeIdx + 3);
+            continue;
+          }
+          segments.push({ type: 'code', language, content: innerContent });
+          remaining = remaining.slice(closeIdx + 3);
+        } else {
           segments.push({ type: 'code', language, content: remaining.slice(codeStart), incomplete: true });
           remaining = '';
-        } else {
-          segments.push({ type: 'code', language, content: remaining.slice(codeStart, closeIdx) });
-          remaining = remaining.slice(closeIdx + 3);
         }
         break;
       }
@@ -129,6 +149,56 @@ const parseMessageParts = (content) => {
       }
       case 'cmd': {
         segments.push({ type: 'terminal_action', command: earliest.match[1].trim() });
+        remaining = remaining.slice(earliest.index + earliest.match[0].length);
+        break;
+      }
+      case 'edit': {
+        const editPath = earliest.match[1].trim();
+        const afterEditTag = remaining.slice(earliest.index + earliest.match[0].length);
+        const editCloseMatch = afterEditTag.match(/\[\s*\/\s*EDIT\s*\]/i);
+        if (editCloseMatch) {
+          let editBody = afterEditTag.slice(0, editCloseMatch.index);
+
+          // Eğer AI kodları markdown block içine almışsa temizle
+          const mdBlock = /^```[a-zA-Z]*\n?([\s\S]*?)\n?```$/;
+          const mdM = editBody.match(mdBlock);
+          if (mdM) editBody = mdM[1];
+
+          const oldMatch = editBody.match(/\[\s*OLD\s*\]([\s\S]*?)\[\s*\/\s*OLD\s*\]/i);
+          const newMatch = editBody.match(/\[\s*NEW\s*\]([\s\S]*?)\[\s*\/\s*NEW\s*\]/i);
+
+          if (oldMatch && newMatch) {
+            segments.push({ type: 'edit_action', path: editPath, oldText: oldMatch[1].trim(), newText: newMatch[1].trim() });
+          } else {
+            // Eğer [OLD] veya [NEW] tag'leri doğru yazılamamışsa içeriği yutma, metin olarak göster
+            segments.push({ type: 'text', content: `[EDIT: ${editPath}]\n${editBody}\n[/EDIT]` });
+          }
+          remaining = afterEditTag.slice(editCloseMatch.index + editCloseMatch[0].length);
+        } else {
+          remaining = afterEditTag;
+        }
+        break;
+      }
+      case 'model_cmd': {
+        try {
+          const json = JSON.parse(earliest.match[1]);
+          let cmd = '';
+          if (Array.isArray(json.cmd)) {
+            // Shell çağrılarını filtrele: bash -lc, sh -c vs.
+            const shellArgs = ['bash', 'sh', 'cmd', 'cmd.exe', 'powershell', '-lc', '-c', '-l', '/c'];
+            const filtered = json.cmd.filter(c => !shellArgs.includes(c));
+            cmd = filtered.join(' ');
+          } else if (typeof json.cmd === 'string') {
+            cmd = json.cmd;
+          } else if (typeof json.command === 'string') {
+            cmd = json.command;
+          }
+          if (cmd.trim()) {
+            segments.push({ type: 'terminal_action', command: cmd.trim() });
+          }
+        } catch (_) {
+          // JSON parse başarısız — metin olarak göster
+        }
         remaining = remaining.slice(earliest.index + earliest.match[0].length);
         break;
       }
@@ -263,18 +333,19 @@ const FileActionBlock = ({ path: filePath, content, incomplete, actionId, state,
           <span className="action-path">{filePath}</span>
           <span className="action-lang">{lang}</span>
         </div>
-        {!incomplete && status === 'pending' && (
+        {!incomplete && (status === 'pending' || status === 'auto_applied') && (
           <div className="action-buttons">
-            <button className="action-btn approve" onClick={() => onApprove(actionId, { type: 'file_action', path: filePath, content })}>
-              <Check size={12} /> Uygula
+            <button className="action-btn approve" onClick={() => status === 'auto_applied' ? onApprove(actionId, { type: 'mark_done' }) : onApprove(actionId, { type: 'file_action', path: filePath, content })}>
+              <Check size={12} /> {status === 'auto_applied' ? 'Kaydet' : 'Uygula'}
             </button>
-            <button className="action-btn reject" onClick={() => onReject(actionId)}>
-              <X size={12} /> Reddet
+            <button className="action-btn reject" onClick={() => onReject(actionId, status === 'auto_applied', { type: 'file_action', path: filePath })}>
+              <X size={12} /> {status === 'auto_applied' ? 'Geri Al' : 'Reddet'}
             </button>
           </div>
         )}
         {status === 'running' && <span className="action-status running"><Loader2 size={12} className="spin" /> Uygulanıyor...</span>}
         {status === 'done' && <span className="action-status done"><Check size={12} /> Uygulandı</span>}
+        {status === 'auto_applied' && <span className="action-status auto-applied" style={{ marginLeft: 'auto', fontSize: '11px', color: '#8b949e' }}>Geçici olarak oluşturuldu</span>}
         {status === 'rejected' && <span className="action-status rejected">Reddedildi</span>}
         {status === 'error' && <span className="action-status error"><AlertTriangle size={12} /> {state.error}</span>}
       </div>
@@ -337,6 +408,45 @@ const MkdirActionBlock = ({ path: dirPath, actionId, state }) => {
         {status === 'running' && <span className="action-status running"><Loader2 size={12} className="spin" /> Oluşturuluyor...</span>}
         {status === 'done' && <span className="action-status done"><Check size={12} /> Oluşturuldu</span>}
         {status === 'error' && <span className="action-status error"><AlertTriangle size={12} /> Hata</span>}
+      </div>
+    </div>
+  );
+};
+
+const EditActionBlock = ({ path: filePath, oldText, newText, actionId, state, onApprove, onReject }) => {
+  const status = state?.status || 'pending';
+  const stateClass = status !== 'pending' ? ` state-${status}` : '';
+
+  return (
+    <div className={`action-block file-action${stateClass}`}>
+      <div className="action-block-header">
+        <div className="action-header-info">
+          <FileCode size={14} />
+          <span className="action-path">{filePath}</span>
+          <span className="action-label" style={{ background: '#2d6a4f', color: '#b7e4c7', padding: '1px 6px', borderRadius: '3px', fontSize: '10px' }}>Düzenle</span>
+        </div>
+        {status === 'pending' && (
+          <div className="action-buttons">
+            <button className="action-btn approve" onClick={() => onApprove(actionId, { type: 'edit_action', path: filePath, oldText, newText })}>
+              <Check size={12} /> Uygula
+            </button>
+            <button className="action-btn reject" onClick={() => onReject(actionId)}>
+              <X size={12} /> Reddet
+            </button>
+          </div>
+        )}
+        {status === 'running' && <span className="action-status running"><Loader2 size={12} className="spin" /> Uygulanıyor...</span>}
+        {status === 'done' && <span className="action-status done"><Check size={12} /> Uygulandı</span>}
+        {status === 'rejected' && <span className="action-status rejected">Reddedildi</span>}
+        {status === 'error' && <span className="action-status error"><AlertTriangle size={12} /> {state.error}</span>}
+      </div>
+      <div className="code-block-body file-code-preview" style={{ fontSize: '12px' }}>
+        <div style={{ color: '#f47067', background: 'rgba(244,112,103,0.1)', padding: '2px 6px', borderRadius: '3px', margin: '2px 0' }}>
+          <span style={{ opacity: 0.5 }}>- </span>{oldText}
+        </div>
+        <div style={{ color: '#57ab5a', background: 'rgba(87,171,90,0.1)', padding: '2px 6px', borderRadius: '3px', margin: '2px 0' }}>
+          <span style={{ opacity: 0.5 }}>+ </span>{newText}
+        </div>
       </div>
     </div>
   );
@@ -468,6 +578,8 @@ const MessageContent = ({ content, messageIndex, actionStates, onApprove, onReje
             return <MkdirActionBlock key={i} path={part.path} actionId={actionId} state={state} />;
           case 'terminal_action':
             return <TerminalActionBlock key={i} command={part.command} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} onContinue={onContinue} />;
+          case 'edit_action':
+            return <EditActionBlock key={i} path={part.path} oldText={part.oldText} newText={part.newText} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} />;
           default:
             return <span key={i} className="message-text">{renderInlineText(part.content)}</span>;
         }
@@ -526,7 +638,12 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
     return () => clearInterval(interval);
   }, []);
 
-  const handleActionApprove = async (actionId, action) => {
+  const handleActionApprove = async (actionId, action, isAuto = false) => {
+    if (action.type === 'mark_done') {
+      setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
+      return;
+    }
+
     setActionStates(prev => ({ ...prev, [actionId]: { status: 'running' } }));
     try {
       const useBackend = !!currentDirPath;
@@ -538,64 +655,232 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
 
       switch (action.type) {
         case 'file_action': {
-          if (useBackend) {
-            const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
-            const res = await fetch('http://localhost:3001/api/save-file', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ path: fullPath, content: action.content })
-            });
-            if (!res.ok) throw new Error('Dosya kaydedilemedi');
-          } else {
-            await fsaaWriteFile(currentDirHandle, action.path, action.content);
+          let errorMsg = null;
+          try {
+            if (useBackend) {
+              const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
+              const res = await fetch('http://localhost:3001/api/save-file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: fullPath, content: action.content })
+              });
+              if (!res.ok) throw new Error('Dosya kaydedilemedi');
+            } else {
+              await fsaaWriteFile(currentDirHandle, action.path, action.content);
+            }
+          } catch (err) {
+            errorMsg = err.message;
           }
-          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
-          setTimeout(() => onFileChange?.(), 300);
+
+          if (errorMsg) {
+            setActionStates(prev => ({ ...prev, [actionId]: { status: 'error', error: errorMsg } }));
+            if (sendMessageProgrammatically.current) {
+              sendMessageProgrammatically.current(`[SİSTEM: ${action.path} dosyası oluşturulurken hata oluştu: ${errorMsg}. Lütfen hatayı düzeltin.]`);
+            }
+          } else {
+            setActionStates(prev => ({ ...prev, [actionId]: { status: isAuto ? 'auto_applied' : 'done' } }));
+            setTimeout(() => onFileChange?.(), 300);
+          }
           break;
         }
         case 'delete_action': {
-          if (useBackend) {
-            const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
-            const res = await fetch('http://localhost:3001/api/delete-file', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ path: fullPath })
-            });
-            if (!res.ok) throw new Error('Dosya silinemedi');
-          } else {
-            await fsaaDeleteFile(currentDirHandle, action.path);
+          let errorMsg = null;
+          try {
+            if (useBackend) {
+              const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
+              const res = await fetch('http://localhost:3001/api/delete-file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: fullPath })
+              });
+              if (!res.ok) throw new Error('Dosya silinemedi');
+            } else {
+              await fsaaDeleteFile(currentDirHandle, action.path);
+            }
+          } catch (err) {
+            errorMsg = err.message;
           }
-          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
-          setTimeout(() => onFileChange?.(), 300);
+
+          if (errorMsg) {
+            setActionStates(prev => ({ ...prev, [actionId]: { status: 'error', error: errorMsg } }));
+            if (sendMessageProgrammatically.current) {
+              sendMessageProgrammatically.current(`[SİSTEM: ${action.path} dosyası silinirken hata oluştu: ${errorMsg}.]`);
+            }
+          } else {
+            setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
+            setTimeout(() => onFileChange?.(), 300);
+          }
           break;
         }
         case 'mkdir_action': {
-          if (useBackend) {
+          let errorMsg = null;
+          try {
+            if (useBackend) {
+              const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
+              const res = await fetch('http://localhost:3001/api/mkdir', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: fullPath })
+              });
+              if (!res.ok) throw new Error('Klasör oluşturulamadı');
+            } else {
+              await fsaaMkdir(currentDirHandle, action.path);
+            }
+          } catch (err) {
+            errorMsg = err.message;
+          }
+
+          if (errorMsg) {
+            setActionStates(prev => ({ ...prev, [actionId]: { status: 'error', error: errorMsg } }));
+            if (sendMessageProgrammatically.current) {
+              sendMessageProgrammatically.current(`[SİSTEM: ${action.path} klasörü oluşturulurken hata oluştu: ${errorMsg}.]`);
+            }
+          } else {
+            setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
+            setTimeout(() => onFileChange?.(), 300);
+          }
+          break;
+        }
+        case 'edit_action': {
+          let errorMsg = null;
+          try {
+            if (!useBackend) {
+              throw new Error('Dosya düzenleme özelliği şu anda sadece Masaüstü IDE (Backend) modunda çalışır. Lütfen projeyi terminal üzerinden başlatın.');
+            }
             const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
-            const res = await fetch('http://localhost:3001/api/mkdir', {
+            const editRes = await fetch('http://localhost:3001/api/edit-file', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ path: fullPath })
+              body: JSON.stringify({ path: fullPath, oldText: action.oldText, newText: action.newText })
             });
-            if (!res.ok) throw new Error('Klasör oluşturulamadı');
-          } else {
-            await fsaaMkdir(currentDirHandle, action.path);
+            if (!editRes.ok) {
+              const errData = await editRes.json();
+              throw new Error(errData.error || 'Düzenleme başarısız');
+            }
+          } catch (err) {
+            errorMsg = err.message;
           }
-          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
-          setTimeout(() => onFileChange?.(), 300);
+
+          if (errorMsg) {
+            setActionStates(prev => ({ ...prev, [actionId]: { status: 'error', error: errorMsg } }));
+            if (sendMessageProgrammatically.current) {
+              sendMessageProgrammatically.current(`[SİSTEM: ${action.path} dosyası düzenlenirken hata oluştu: ${errorMsg}. Lütfen hatayı analiz et ve geçerli bir içerik belirterek tekrar dene.]`);
+            }
+          } else {
+            setActionStates(prev => ({ ...prev, [actionId]: { status: 'done' } }));
+            setTimeout(() => onFileChange?.(), 300);
+          }
           break;
         }
         case 'terminal_action': {
-          if (!currentDirPath) {
-            throw new Error('Terminal komutları çalıştırmak için backend modu gerekli — klasörü terminal üzerinden açın.');
-          }
-          const res = await fetch(AGENT_EXEC_URL, {
+          // Streaming yaklaşım: process başlat, 5sn'de bir çıktıyı kontrol et
+          const startRes = await fetch('http://localhost:3001/api/agent-run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: action.command, cwd: currentDirPath })
+            body: JSON.stringify({ command: action.command, cwd: currentDirPath || undefined })
           });
-          const result = await res.json();
-          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done', result } }));
+          const { procId } = await startRes.json();
+          if (!procId) throw new Error('Process başlatılamadı');
+
+          // Hata kalıpları (EN + TR)
+          const errorPatterns = [
+            'Error:', 'error:', 'ERR!', 'EADDRINUSE', 'MODULE_NOT_FOUND',
+            'Cannot find module', 'SyntaxError', 'TypeError', 'ReferenceError',
+            'ENOENT', 'command not found', 'is not recognized',
+            'hata', 'bulunamadı', 'başarısız'
+          ];
+
+          // Başarı kalıpları — sunucu çalışıyor (EN + TR)
+          const successPatterns = [
+            'listening on', 'ready', 'started', 'running on', 'compiled',
+            'Local:', 'http://localhost', 'http://127.0.0.1', 'Server running', 'serving',
+            'VITE', 'webpack compiled', 'Successfully compiled',
+            'çalışıyor', 'portunda', 'dinliyor', 'başlatıldı', 'hazır',
+            ':3000', ':3001', ':4000', ':5000', ':5173', ':8000', ':8080', ':8888'
+          ];
+
+          let pollCount = 0;
+          const maxPolls = 24; // 2 dakika (24 * 5sn)
+
+          const pollStatus = async () => {
+            pollCount++;
+            try {
+              const statusRes = await fetch('http://localhost:3001/api/agent-status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ procId })
+              });
+              const status = await statusRes.json();
+
+              // UI'ı güncelle (canlı çıktı)
+              const currentResult = {
+                stdout: status.stdout || '',
+                stderr: status.stderr || '',
+                exitCode: status.exitCode
+              };
+              setActionStates(prev => ({
+                ...prev,
+                [actionId]: { status: status.running ? 'running' : 'done', result: currentResult }
+              }));
+
+              // Process tamamlandı
+              if (!status.running) {
+                const isSuccess = status.exitCode === 0;
+                setTimeout(() => handleTerminalContinue(actionId, currentResult, isSuccess), 300);
+                return; // Polling durdur
+              }
+
+              const combined = (status.stdout || '') + '\n' + (status.stderr || '');
+
+              // Hata kontrolü
+              const hasError = errorPatterns.some(p => combined.includes(p));
+              const hasSuccess = successPatterns.some(p =>
+                combined.toLowerCase().includes(p.toLowerCase())
+              );
+
+              if (hasError && !hasSuccess) {
+                // Hata tespit edildi — process'i durdur ve AI'a bildir
+                await fetch('http://localhost:3001/api/agent-kill', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ procId })
+                });
+                const errResult = { ...currentResult, exitCode: 1 };
+                setActionStates(prev => ({ ...prev, [actionId]: { status: 'done', result: errResult } }));
+                setTimeout(() => handleTerminalContinue(actionId, errResult, false), 300);
+                return;
+              }
+
+              if (hasSuccess) {
+                // Sunucu çalışıyor! Process'i öldürme, AI'a başarı bildir
+                const successResult = { ...currentResult, exitCode: 0 };
+                setActionStates(prev => ({
+                  ...prev,
+                  [actionId]: { status: 'done', result: successResult, serverRunning: true, procId }
+                }));
+                setTimeout(() => handleTerminalContinue(actionId, successResult, true), 300);
+                return;
+              }
+
+              // Hâlâ çalışıyor, hata/başarı yok — tekrar dene
+              if (pollCount < maxPolls) {
+                setTimeout(pollStatus, 5000);
+              } else {
+                // Zaman aşımı — mevcut çıktıyı AI'a gönder
+                const timeoutResult = { ...currentResult, exitCode: 0 };
+                setActionStates(prev => ({ ...prev, [actionId]: { status: 'done', result: timeoutResult } }));
+                setTimeout(() => handleTerminalContinue(actionId, timeoutResult, true), 300);
+              }
+            } catch (err) {
+              setActionStates(prev => ({
+                ...prev,
+                [actionId]: { status: 'error', error: 'Polling hatası: ' + err.message }
+              }));
+            }
+          };
+
+          // İlk kontrol yarım saniye sonra (hızlı komutlar için)
+          setTimeout(pollStatus, 500);
           break;
         }
       }
@@ -604,9 +889,46 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
     }
   };
 
-  const handleActionReject = (actionId) => {
+  const handleActionReject = async (actionId, isRollback = false, action = null) => {
+    if (isRollback && action && action.type === 'file_action') {
+      setActionStates(prev => ({ ...prev, [actionId]: { status: 'running' } }));
+      try {
+        if (currentDirPath) {
+          const fullPath = currentDirPath + '\\' + action.path.replace(/\//g, '\\');
+          await fetch('http://localhost:3001/api/delete-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: fullPath })
+          });
+        }
+        setTimeout(() => onFileChange?.(), 300);
+      } catch (err) {
+        console.error('Geri alma hatası', err);
+      }
+    }
     setActionStates(prev => ({ ...prev, [actionId]: { status: 'rejected' } }));
   };
+
+  useEffect(() => {
+    if (isTyping) return;
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.role === 'assistant') {
+      const parts = parseMessageParts(lastMsg.content);
+      parts.forEach((part, i) => {
+        const actionId = `msg-${messages.length - 1}-part-${i}`;
+        if (!part.incomplete && !autoTriggeredRef.current.has(actionId) && !actionStates[actionId]) {
+          if (part.type === 'file_action' || part.type === 'mkdir_action') {
+            autoTriggeredRef.current.add(actionId);
+            handleActionApprove(actionId, part, true); // true: isAuto ('Geri Al' butonu çıkacak)
+          } else if (part.type === 'terminal_action' && isSafeCommand(part.command)) {
+            autoTriggeredRef.current.add(actionId);
+            // Terminal komutu otomatik çalışır ancak UI normal 'done' olur (zaten geri alınamaz)
+            handleActionApprove(actionId, part, false);
+          }
+        }
+      });
+    }
+  }, [messages, isTyping, actionStates]);
 
   const sendMessageProgrammatically = useRef(null);
 
@@ -623,11 +945,15 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
 
     const truncated = output.length > 2000 ? output.slice(-2000) + '\n...(kısaltıldı)' : output;
 
+    // Çıktıdan port bilgisini algıla
+    const portMatch = output.match(/(?:localhost|127\.0\.0\.1|portunda|port\s*)[:\s]*(\d{4,5})/i);
+    const portInfo = portMatch ? `http://localhost:${portMatch[1]}` : '';
+
     let feedbackMsg;
     if (isSuccess) {
-      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomut başarıyla tamamlandı, devam edebilirsin.`;
+      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomut başarıyla tamamlandı.${portInfo ? ` Sunucu ${portInfo} adresinde çalışıyor.` : ''} Kullanıcıya sonucu kısaca açıkla${portInfo ? `, erişim adresini belirt` : ''}. Eğer bir sunucu çalışıyorsa terminale yazacağı komutu da belirt.`;
     } else {
-      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomutta hata var. Lütfen hatayı analiz et ve çözüm öner.`;
+      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomutta hata var. Hatayı analiz et, nedenini açıkla ve çözüm olarak düzeltilmiş komutu [CMD: ...] ile çalıştır.`;
     }
 
     if (sendMessageProgrammatically.current) {
@@ -635,30 +961,13 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
     }
   };
 
-  // Auto-execute safe actions (mkdir, non-dangerous terminal commands)
-  useEffect(() => {
-    const lastMsg = messages[messages.length - 1];
-    const lastIdx = messages.length - 1;
-    if (!lastMsg || lastMsg.role !== 'assistant' || !currentDirPath) return;
 
-    const parts = parseMessageParts(lastMsg.content);
-    parts.forEach((part, partIdx) => {
-      if (part.incomplete) return;
-      const actionId = `msg-${lastIdx}-part-${partIdx}`;
-      if (autoTriggeredRef.current.has(actionId)) return;
-
-      if (part.type === 'mkdir_action') {
-        autoTriggeredRef.current.add(actionId);
-        handleActionApprove(actionId, part);
-      }
-    });
-  }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSend = async (overrideContent) => {
     const msgContent = overrideContent || input.trim();
     if (!msgContent || isTyping) return;
 
-    const userMessage = { role: 'user', content: msgContent };
+    const userMessage = { role: 'user', content: msgContent, hidden: !!overrideContent };
     const updatedMessages = [...messages, userMessage];
     setMessages(updatedMessages);
     if (!overrideContent) setInput('');
@@ -703,12 +1012,32 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
 KRİTİK KURAL: Kod yazdığında ASLA \`\`\`html veya \`\`\`css gibi markdown blokları kullanma! Dosya oluşturmak için HER ZAMAN [FILE: ...][/FILE] etiketlerini kullan.
 
 ARAÇLAR:
-[FILE: dosya.uzanti]kod buraya[/FILE]  → Dosya oluşturur
+[FILE: dosya.uzanti]kod buraya[/FILE]  → YENİ dosya oluşturur (tüm içerik)
+[EDIT: dosya.uzanti][OLD]eski metin[/OLD][NEW]yeni metin[/NEW][/EDIT]  → MEVCUT dosyayı düzenler (kısmi değişiklik)
 [DELETE_FILE: dosya.uzanti]           → Dosya siler
 [MKDIR: klasor]                       → Klasör oluşturur
 [CMD: komut]                          → Terminal komutu çalıştırır
 
-DOĞRU ÖRNEK:
+KRİTİK DOSYA DÜZENLEME KURALI:
+- Mevcut bir dosyada küçük bir değişiklik yapılacaksa ASLA [FILE:] kullanma! [EDIT:] kullan.
+- [FILE:] sadece YENİ dosya oluşturmak veya dosyanın TAMAMINI yeniden yazmak için kullan.
+- [EDIT:] ile sadece değişen kısmı belirt, dosyanın geri kalanına dokunma.
+
+DOĞRU DÜZENLEME ÖRNEĞİ:
+Kullanıcı: "başlığı 'Merhaba' olarak değiştir"
+Yanıt: Başlığı değiştiriyorum:
+[EDIT: index.html]
+[OLD]<h1>Eski Başlık</h1>[/OLD]
+[NEW]<h1>Merhaba</h1>[/NEW]
+[/EDIT]
+
+YANLIŞ DÜZENLEME (ASLA YAPMA):
+[FILE: index.html]
+(tüm dosya içeriği buraya...)
+[/FILE]
+↑ Bu YANLIŞ! Küçük değişiklik için tüm dosyayı yeniden yazma!
+
+DOĞRU DOSYA OLUŞTURMA ÖRNEĞİ:
 Kullanıcı: "bir login sayfası oluştur"
 Yanıt: Login sayfanızı oluşturuyorum:
 [FILE: login.html]
@@ -719,6 +1048,11 @@ Yanıt: Login sayfanızı oluşturuyorum:
 [/FILE]
 login.html dosyası oluşturuldu.
 
+DOĞRU TERMİNAL ÖRNEĞİ:
+Kullanıcı: "bu projeyi çalıştır"
+Yanıt: Projeyi başlatıyorum:
+[CMD: npm run dev]
+
 YANLIŞ ÖRNEK (ASLA YAPMA):
 \`\`\`html
 <html>...</html>
@@ -727,16 +1061,25 @@ YANLIŞ ÖRNEK (ASLA YAPMA):
 
 TERMİNAL KURALLARI:
 - Terminal komutu çalıştırmak için [CMD: komut] kullan.
+- [CMD: ...] etiketini ASLA \`\`\` kod bloklarının içine yazma! Düz metin olarak yaz.
 - BİR MESAJDA SADECE BİR [CMD:] etiketi kullan!
-- Komut çalıştırdıktan sonra DUR ve kullanıcının çıktıyı onaylamasını bekle.
+- Komut çalıştırdıktan sonra DUR ve çıktıyı bekle.
 - Kullanıcı çıktıyı paylaştığında analiz et: başarılıysa sonraki adıma geç, hata varsa çözüm öner.
 - Birden fazla komut gerekiyorsa her birini ayrı adımda çalıştır — hepsini tek seferde yazma.
+- PROJE BİLGİSİ verilmişse (package.json, requirements.txt vb.) projeye UYGUN komutlar kullan!
+  Önce proje yapısını analiz et (Windows için 'dir', Mac/Linux için 'ls -la'), sonra uygun komutu çalıştır.
+
+DOSYA DÜZENLEME KURALLARI (ZORUNLU):
+1. **ASLA** mevcut klasörde hangi dosyaların olduğunu görmeden dosya oluşturma veya değiştirme! Önce terminalden \`dir\` veya \`ls -la\` çalıştır.
+2. Bir dosyayı düzenlemeden ÖNCE **KESİNLİKLE** terminal komutuyla içeriğini oku (Windows: \`type dosya.html\`, Mac/Linux: \`cat dosya.html\`). İçeriği görmeden ezbere [EDIT:] YAPMA.
+3. İçeriği okuduktan sonra sadece değiştireceğin kısmı [EDIT:] ile güncelle.
 
 GENEL KURALLAR:
-- Dosya oluştururken SADECE [FILE: ...][/FILE] kullan, \`\`\`html KULLANMA.
-- Her dosya için ayrı [FILE:] etiketi aç, iç içe kullanma.
-- "Dosya oluşturamam" gibi bahaneler üretme.
-- İşlem sonrası ne yaptığını kısaca açıkla.`;
+- YENİ dosya oluştururken [FILE: ...][/FILE] kullan.
+- MEVCUT dosyayı düzenlerken [EDIT: ...][OLD]...[/OLD][NEW]...[/NEW][/EDIT] kullan.
+- \`\`\`html gibi markdown kod blokları KULLANMA. Eylemlerini düz metin olarak etiketlerle gerçekleştir.
+- Her dosya için ayrı etiket aç, iç içe kullanma.
+- "Dosya oluşturamam" gibi bahaneler üretme.`;
 
       apiMessages.unshift({ role: 'system', content: globalSysMsg });
 
@@ -746,6 +1089,31 @@ GENEL KURALLAR:
         for (const tab of openTabs) {
           openFilesContext += `\n[DOSYA BAŞI: ${tab.name}]\n${tab.content || '(Boş Dosya)'}\n[DOSYA SONU: ${tab.name}]\n`;
         }
+      }
+
+      // Otomatik proje bilgisi enjeksiyonu (package.json scripts)
+      let autoProjectInfo = '';
+      if (currentDirPath) {
+        try {
+          const pkgRes = await fetch('http://localhost:3001/api/read-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: currentDirPath + '\\package.json' })
+          });
+          if (pkgRes.ok) {
+            const pkgData = await pkgRes.json();
+            if (pkgData.content) {
+              try {
+                const pkg = JSON.parse(pkgData.content);
+                const info = [];
+                if (pkg.name) info.push(`Proje: ${pkg.name}`);
+                if (pkg.scripts) info.push(`Scripts: ${JSON.stringify(pkg.scripts)}`);
+                if (pkg.dependencies) info.push(`Dependencies: ${Object.keys(pkg.dependencies).join(', ')}`);
+                autoProjectInfo = `\n\nPROJE BİLGİSİ (${currentDirPath}):\n${info.join('\n')}`;
+              } catch (_) { }
+            }
+          }
+        } catch (_) { /* sessizce devam */ }
       }
 
       let fullProjectContext = '';
@@ -767,8 +1135,8 @@ GENEL KURALLAR:
         }
       }
 
-      if (openFilesContext || fullProjectContext) {
-        const systemContextInjection = `\n\n=== IDE SİSTEM BİLGİSİ ===\n${openFilesContext}\n${fullProjectContext}\n====================\n\nYukarıdaki dosya bilgilerini referans alarak cevap ver.`;
+      if (openFilesContext || fullProjectContext || autoProjectInfo) {
+        const systemContextInjection = `\n\n=== IDE SİSTEM BİLGİSİ ===${autoProjectInfo}\n${openFilesContext}\n${fullProjectContext}\n====================\n\nYukarıdaki bilgileri referans alarak cevap ver.`;
         const lastMsgIndex = apiMessages.length - 1;
         if (lastMsgIndex >= 0 && apiMessages[lastMsgIndex].role === 'user') {
           apiMessages[lastMsgIndex].content = apiMessages[lastMsgIndex].content + systemContextInjection;
@@ -937,7 +1305,7 @@ GENEL KURALLAR:
       )}
 
       <div className="messages-container">
-        {messages.map((message, index) => (
+        {messages.filter(m => !m.hidden).map((message, index) => (
           <div
             key={index}
             className={`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`}
