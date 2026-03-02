@@ -478,7 +478,7 @@ const TerminalActionBlock = ({ command, actionId, state, onApprove, onReject, on
               <button className="terminal-run-btn" onClick={() => onApprove(actionId, { type: 'terminal_action', command })}>
                 <Play size={11} /> Çalıştır
               </button>
-              <button className="terminal-skip-btn" onClick={() => onReject(actionId)}>
+              <button className="terminal-skip-btn" onClick={() => onReject(actionId, false, { type: 'terminal_action', command })}>
                 <X size={11} /> Atla
               </button>
             </div>
@@ -905,8 +905,15 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
       } catch (err) {
         console.error('Geri alma hatası', err);
       }
+      setActionStates(prev => ({ ...prev, [actionId]: { status: 'rejected' } }));
+    } else {
+      setActionStates(prev => ({ ...prev, [actionId]: { status: 'rejected' } }));
+      if (action && action.type === 'terminal_action') {
+        if (sendMessageProgrammatically.current) {
+          sendMessageProgrammatically.current(`[SİSTEM: Kullanıcı \`${action.command}\` komutunu çalıştırmayı reddetti (Atlandı). Lütfen duruma göre alternatif bir komut veya yöntem öner.]`);
+        }
+      }
     }
-    setActionStates(prev => ({ ...prev, [actionId]: { status: 'rejected' } }));
   };
 
   useEffect(() => {
@@ -920,10 +927,6 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
           if (part.type === 'file_action' || part.type === 'mkdir_action') {
             autoTriggeredRef.current.add(actionId);
             handleActionApprove(actionId, part, true); // true: isAuto ('Geri Al' butonu çıkacak)
-          } else if (part.type === 'terminal_action' && isSafeCommand(part.command)) {
-            autoTriggeredRef.current.add(actionId);
-            // Terminal komutu otomatik çalışır ancak UI normal 'done' olur (zaten geri alınamaz)
-            handleActionApprove(actionId, part, false);
           }
         }
       });
@@ -951,9 +954,9 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
 
     let feedbackMsg;
     if (isSuccess) {
-      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomut başarıyla tamamlandı.${portInfo ? ` Sunucu ${portInfo} adresinde çalışıyor.` : ''} Kullanıcıya sonucu kısaca açıkla${portInfo ? `, erişim adresini belirt` : ''}. Eğer bir sunucu çalışıyorsa terminale yazacağı komutu da belirt.`;
+      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomut başarıyla tamamlandı.${portInfo ? ` Sunucu ${portInfo} adresinde çalışıyor.` : ''} Lütfen çıktıyı dikkatlice analiz ederek kodun gerçekten hatasız çalıştığını doğrula (bazen exit code 0 olsa da uyarı veya hatalar olabilir). Eğer beklenmeyen bir çıktı veya hata gördüysen düzeltmek için uygun adımı at, sorun yoksa kullanıcıya sonucu kısaca açıkla.`;
     } else {
-      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomutta hata var. Hatayı analiz et, nedenini açıkla ve çözüm olarak düzeltilmiş komutu [CMD: ...] ile çalıştır.`;
+      feedbackMsg = `[Terminal çıktısı - exit code: ${result?.exitCode ?? '?'}]\n\`\`\`\n${truncated || '(çıktı yok)'}\n\`\`\`\nKomutta hata var veya başarısız oldu. Hatayı analiz et, nedenini açıkla ve çözüm için düzeltilmiş kodu/komutu oluştur, sonrasında uygun komutu tekrardan [CMD: ...] ile çalıştır.`;
     }
 
     if (sendMessageProgrammatically.current) {
@@ -1072,8 +1075,9 @@ TERMİNAL KURALLARI:
 - Terminal komutu çalıştırmak için [CMD: komut] kullan.
 - [CMD: ...] etiketini ASLA \`\`\` kod bloklarının içine yazma! Düz metin olarak yaz.
 - BİR MESAJDA SADECE BİR [CMD:] etiketi kullan!
-- Komut çalıştırdıktan sonra DUR ve çıktıyı bekle.
-- Kullanıcı çıktıyı paylaştığında analiz et: başarılıysa sonraki adıma geç, hata varsa çözüm öner.
+- [CMD: ...] yazdığında sistem DURUR ve kullanıcının onayını bekler. Asla otomatik çalışmaz.
+- Kullanıcı komutu onaylayıp çalıştırdığında SİSTEM sana çıktıyı arka planda otomatik olarak iletecektir, çıktıyı inceleyip sonucu kullanıcıya bildir.
+- SİSTEM komut çıktısını sana gönderdiğinde mutlaka analiz et: kod hatasız çalıştıysa devam et, hata varsa düzeltmek için yeni bir adım at.
 - Birden fazla komut gerekiyorsa her birini ayrı adımda çalıştır — hepsini tek seferde yazma.
 - PROJE BİLGİSİ verilmişse (package.json, requirements.txt vb.) projeye UYGUN komutlar kullan!
   Önce proje yapısını analiz et (Windows için 'dir', Mac/Linux için 'ls -la'), sonra uygun komutu çalıştır.
