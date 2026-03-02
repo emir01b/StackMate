@@ -964,13 +964,18 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
 
 
   const handleSend = async (overrideContent) => {
-    const msgContent = overrideContent || input.trim();
+    // Eğer overrideContent DOM event'i (onClick vb.) ise yok say
+    const isOverrideString = typeof overrideContent === 'string';
+    const msgContent = (isOverrideString ? overrideContent : input).trim();
+
     if (!msgContent || isTyping) return;
 
-    const userMessage = { role: 'user', content: msgContent, hidden: !!overrideContent };
+    const userMessage = { role: 'user', content: msgContent, hidden: isOverrideString };
     const updatedMessages = [...messages, userMessage];
     setMessages(updatedMessages);
-    if (!overrideContent) setInput('');
+
+    // Eğer override(sistem tetiklemesi) değilse input alanını temizle
+    if (!isOverrideString) setInput('');
     setIsTyping(true);
 
     setIsProcessingPrompt(true);
@@ -987,11 +992,15 @@ const AIPanel = ({ currentDirPath, currentDirHandle, projectName, openTabs, acti
 
     try {
       const apiMessages = [];
-      const filtered = updatedMessages.filter(m =>
-        !m.content.startsWith('(Yanıt alınamadı)') &&
-        !m.content.startsWith('⚠️') &&
-        !m.content.startsWith('❌')
-      );
+      const filtered = updatedMessages.filter(m => {
+        if (!m || !m.content) return false;
+        if (typeof m.content === 'string') {
+          return !m.content.startsWith('(Yanıt alınamadı)') &&
+            !m.content.startsWith('⚠️') &&
+            !m.content.startsWith('❌');
+        }
+        return true;
+      });
 
       for (let i = 0; i < filtered.length; i++) {
         const m = filtered[i];
