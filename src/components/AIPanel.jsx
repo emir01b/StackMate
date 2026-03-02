@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Loader2, Trash2, Copy, Check, X, FileCode, FolderPlus, Terminal as TerminalIcon, Play, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import { Send, Bot, User, Loader2, Trash2, Eraser, Copy, Check, X, FileCode, FolderPlus, Terminal as TerminalIcon, Play, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
 import './AIPanel.css';
 
 const LM_STUDIO_URL = 'http://localhost:3001/api/ai-chat';
@@ -1269,11 +1269,21 @@ GENEL KURALLAR:
   };
 
   const handleClearChat = () => {
-    setMessages([
-      { role: 'assistant', content: 'Sohbet temizlendi. Size nasıl yardımcı olabilirim?' }
+    if (window.confirm('Tüm sohbet geçmişi tamamen silinecek. Emin misiniz?')) {
+      setMessages([
+        { role: 'assistant', content: 'Hafıza tamamen temizlendi. Size nasıl yardımcı olabilirim?', hiddenFromUI: false }
+      ]);
+      setActionStates({});
+      autoTriggeredRef.current.clear();
+    }
+  };
+
+  const handleHideChat = () => {
+    // Mesajları LLM'in hatırlaması için silmiyoruz, ama kullanıcının görmemesi için gizliyoruz
+    setMessages(prev => [
+      ...prev.map(m => ({ ...m, hiddenFromUI: true })),
+      { role: 'assistant', content: 'Sohbet ekranı temizlendi ancak önceki konuştuklarımızı hatırlıyorum. Devam edebiliriz!', hiddenFromUI: false }
     ]);
-    setActionStates({});
-    autoTriggeredRef.current.clear();
   };
 
   const handleKeyPress = (e) => {
@@ -1293,9 +1303,14 @@ GENEL KURALLAR:
             title={isConnected === true ? `LM Studio bağlı — ${activeModel || 'model yüklü'}` : isConnected === false ? 'LM Studio bağlantısı yok' : 'Kontrol ediliyor...'}
           />
         </div>
-        <button className="clear-chat-btn" onClick={handleClearChat} title="Sohbeti temizle">
-          <Trash2 size={14} />
-        </button>
+        <div className="header-actions" style={{ display: 'flex', gap: '8px' }}>
+          <button className="clear-chat-btn" onClick={handleHideChat} title="Ekranı Temizle (Beni unutmaz)">
+            <Eraser size={14} />
+          </button>
+          <button className="clear-chat-btn" onClick={handleClearChat} title="Hafızayı Temizle (Yepyeni sohbet)">
+            <Trash2 size={14} />
+          </button>
+        </div>
       </div>
 
       {isConnected === true && activeModel && (
@@ -1310,15 +1325,8 @@ GENEL KURALLAR:
         </div>
       )}
 
-      {projectName && currentDirPath && (
-        <div className="project-context-toggle" onClick={() => setIncludeProject(!includeProject)}>
-          <input type="checkbox" checked={includeProject} readOnly />
-          <span>Proje Analizi: <strong>{projectName}</strong></span>
-        </div>
-      )}
-
       <div className="messages-container">
-        {messages.filter(m => !m.hidden).map((message, index) => (
+        {messages.filter(m => !m.hidden && !m.hiddenFromUI).map((message, index) => (
           <div
             key={index}
             className={`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`}
