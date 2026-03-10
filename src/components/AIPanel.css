@@ -105,30 +105,42 @@
   text-overflow: ellipsis;
 }
 
-.project-context-toggle {
-  background-color: rgba(30, 58, 47, 0.4);
-  padding: 8px 16px;
-  font-size: 11px;
+/* Arka planda incelenen dosyalar — küçük, silik satır */
+.explored-files-bar {
+  background-color: #252526;
   border-bottom: 1px solid #2d2d2d;
+  flex-shrink: 0;
+}
+
+.explored-files-header {
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  padding: 6px 12px;
+  border: none;
+  background: none;
+  color: #6e6e6e;
+  font-size: 11px;
   cursor: pointer;
-  color: #aaa;
-  transition: background-color 0.2s;
+  text-align: left;
+  transition: color 0.15s, background-color 0.15s;
 }
 
-.project-context-toggle:hover {
-  background-color: rgba(43, 77, 63, 0.6);
+.explored-files-header:hover {
+  color: #8e8e8e;
+  background-color: rgba(255, 255, 255, 0.04);
 }
 
-.project-context-toggle input {
-  cursor: pointer;
-  accent-color: #007acc;
+.explored-files-list {
+  padding: 2px 12px 8px 24px;
 }
 
-.project-context-toggle strong {
-  color: #89d185;
+.explored-file-item {
+  font-size: 10px;
+  color: #5a5a5a;
+  line-height: 1.6;
+  font-family: ui-monospace, monospace;
 }
 
 /* ─── Messages ─── */
@@ -442,6 +454,8 @@
 
 .code-block-body {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 7.5em;
   padding: 8px 0;
 }
 
@@ -625,8 +639,74 @@
 }
 
 .file-code-preview {
-  max-height: 300px;
+  max-height: 7.5em;
   overflow-y: auto;
+  line-height: 1.5;
+}
+
+/* Edit Action — tek kutu, değişen satırlar */
+.edit-action-block .action-path {
+  font-weight: 500;
+  color: #9cdcfe;
+}
+
+.edit-diff-header .edit-diff-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.edit-diff-filetype {
+  font-size: 10px;
+  color: #6e7681;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.edit-diff-filename {
+  color: #9cdcfe;
+}
+
+.edit-diff-stats {
+  font-size: 11px;
+  color: #8b949e;
+  margin-left: 4px;
+}
+
+.edit-diff-single {
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: #1a1a1a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  max-height: 7.5em;
+  overflow-y: auto;
+  border: 1px solid #2d2d2d;
+}
+
+.edit-diff-line {
+  white-space: pre;
+  word-break: break-all;
+  padding: 0 4px;
+  min-height: 1.5em;
+}
+
+.edit-diff-context .edit-diff-content {
+  color: #d4d4d4;
+}
+
+.edit-diff-remove .edit-diff-content {
+  color: #e5a5a0;
+  background: rgba(248, 81, 73, 0.2);
+  display: block;
+}
+
+.edit-diff-add .edit-diff-content {
+  color: #a5d6a5;
+  background: rgba(63, 185, 80, 0.2);
+  display: block;
 }
 
 /* Delete Action */
@@ -819,6 +899,23 @@
 .terminal-prompt-cmd {
   color: #e0e0e0;
   word-break: break-all;
+}
+
+.terminal-pending-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f5c862;
+  background: rgba(245, 200, 98, 0.1);
+  font-size: 12px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 200, 98, 0.3);
+}
+
+.terminal-pending-indicator strong {
+  color: #e8d480;
 }
 
 .terminal-running-indicator {

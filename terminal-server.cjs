@@ -112,6 +112,14 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ─── API: İşletim sistemi (agent için tek bağlam bilgisi) ─────────────
+  if (req.method === 'GET' && req.url === '/api/os') {
+    const label = PLATFORM === 'win32' ? 'Windows' : PLATFORM === 'darwin' ? 'macOS' : 'Linux';
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ platform: PLATFORM, label }));
+    return;
+  }
+
   // ─── API: Dizin oku ─────────────────────────────────────────────────
   if (req.method === 'POST' && req.url === '/api/read-dir') {
     const body = await parseBody(req);
@@ -156,6 +164,7 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, path: filePath }));
     } catch (err) {
+      console.error('[save-file] Hata:', err.message, '| Yol:', filePath);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
     }
@@ -178,13 +187,21 @@ const server = createServer(async (req, res) => {
         return;
       }
       let content = fs.readFileSync(filePath, 'utf-8');
-      if (!content.includes(oldText)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Eski metin dosyada bulunamadı' }));
-        return;
+      const norm = (s) => (s || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      let newContent;
+      if (content.includes(oldText)) {
+        newContent = content.replace(oldText, newText);
+      } else {
+        const contentNorm = norm(content);
+        const oldNorm = norm(oldText);
+        if (!contentNorm.includes(oldNorm)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Eski metin dosyada bulunamadı' }));
+          return;
+        }
+        newContent = contentNorm.replace(oldNorm, norm(newText));
       }
-      content = content.replace(oldText, newText);
-      fs.writeFileSync(filePath, content, 'utf-8');
+      fs.writeFileSync(filePath, newContent, 'utf-8');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, path: filePath }));
     } catch (err) {
@@ -599,11 +616,17 @@ const server = createServer(async (req, res) => {
   // Process başlat — procId döner
   if (req.method === 'POST' && req.url === '/api/agent-run') {
     const body = await parseBody(req);
-    const { command, cwd: execCwd } = body;
+    let { command, cwd: execCwd } = body;
     if (!command) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'command gerekli' }));
       return;
+    }
+    command = (typeof command === 'string' ? command : '').trim();
+    command = command.replace(/^\s*cmd\s*:\s*/i, '').trim();
+    if (PLATFORM === 'win32' && command.toLowerCase().startsWith('cat ')) {
+      const rest = command.slice(4).trim().replace(/^["']|["']$/g, '');
+      command = 'type ' + rest;
     }
 
     const procId = agentProcCounter++;
