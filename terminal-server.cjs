@@ -386,7 +386,57 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ─── API: Proje Bağlamını Çıkar (Yapay Zeka İçin) ────────────────────
+  // ─── API: Web Search (Araştırma) ──────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/search-web') {
+    const body = await parseBody(req);
+    const query = body.query;
+    if (!query) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Sorgu gerekli' }));
+      return;
+    }
+    try {
+      const fetch = require('node-fetch');
+      const cheerio = require('cheerio');
+      const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
+        }
+      });
+      const html = await response.text();
+      const cher = cheerio.load(html);
+      
+      const results = [];
+      cher('.result').slice(0, 5).each(function() {
+        const title = cher(this).find('.result__title').text().trim();
+        const link = cher(this).find('.result__url').attr('href') || cher(this).find('.result__a').attr('href');
+        const snippet = cher(this).find('.result__snippet').text().trim();
+        
+        if (title && snippet) {
+          let cleanUrl = link;
+          if (link && link.startsWith('//duckduckgo.com/l/?uddg=')) {
+            try { cleanUrl = decodeURIComponent(link.split('uddg=')[1].split('&')[0]); } catch(e){}
+          }
+          results.push({ title, url: cleanUrl, description: snippet });
+        }
+      });
+      
+      if (results.length === 0) {
+        results.push({ title: "Arama Sonuçsuz Kaldı", url: "https://duckduckgo.com/?q=" + encodeURIComponent(query), description: "Bu arama bot engeline takılmış olabilir." })
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ results }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/api/get-project-context') {
     const body = await parseBody(req);
     const dirPath = body.path;

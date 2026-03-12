@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Send, Bot, User, Loader2, Trash2, Eraser, Copy, Check, X,
   FileCode, FolderPlus, Terminal as TerminalIcon, Play, AlertTriangle,
-  ChevronDown, ChevronRight
+  ChevronDown, ChevronRight, Globe, Search
 } from 'lucide-react';
 import './AIPanel.css';
 
@@ -159,12 +159,14 @@ const parseMessageParts = (content) => {
     const mkdirMatch = remaining.match(/\[\s*MKDIR:\s*([^\]]+?)\s*\]/);
     const cmdMatch = remaining.match(/\[\s*CMD:\s*([^\]]+?)\s*\]/);
     const editMatch = remaining.match(/\[\s*EDIT:\s*([^\]]+?)\s*\]/);
+    const webMatch = remaining.match(/\[\s*WEB:\s*([^\]]+?)\s*\]/);
 
     if (fileMatch) candidates.push({ type: 'file', index: fileMatch.index, match: fileMatch });
     if (delMatch) candidates.push({ type: 'delete', index: delMatch.index, match: delMatch });
     if (mkdirMatch) candidates.push({ type: 'mkdir', index: mkdirMatch.index, match: mkdirMatch });
     if (cmdMatch) candidates.push({ type: 'cmd', index: cmdMatch.index, match: cmdMatch });
     if (editMatch) candidates.push({ type: 'edit', index: editMatch.index, match: editMatch });
+    if (webMatch) candidates.push({ type: 'web', index: webMatch.index, match: webMatch });
 
     // Bare CMD (köşeli parantez olmadan)
     if (!cmdMatch) {
@@ -248,6 +250,10 @@ const parseMessageParts = (content) => {
         break;
       case 'mkdir':
         segments.push({ type: 'mkdir_action', path: earliest.match[1].trim() });
+        remaining = remaining.slice(earliest.index + earliest.match[0].length);
+        break;
+      case 'web':
+        segments.push({ type: 'web_action', query: earliest.match[1].trim() });
         remaining = remaining.slice(earliest.index + earliest.match[0].length);
         break;
       case 'cmd':
@@ -571,6 +577,49 @@ const EditActionBlock = ({ path: filePath, oldText, newText, actionId, state, on
   );
 };
 
+const WebSearchActionBlock = ({ query, actionId, state, onApprove, onReject, onContinue }) => {
+  const status = state?.status || 'pending';
+  const result = state?.result;
+  const continued = state?.continued;
+
+  return (
+    <div className={`action-block web-action-block${status !== 'pending' ? ` state-${status}` : ''}`}>
+      <div className="action-block-header">
+        <div className="action-header-info">
+          <Globe size={14} />
+          <span className="action-path">Web Araması: {query}</span>
+        </div>
+        {status === 'pending' && (
+          <div className="action-buttons">
+            <button className="action-btn approve" onClick={() => onApprove(actionId, { type: 'web_action', query })}>
+              <Search size={12} /> Ara
+            </button>
+            <button className="action-btn reject" onClick={() => onReject(actionId)}>
+              <X size={12} /> İptal
+            </button>
+          </div>
+        )}
+        {status === 'running' && <span className="action-status running"><Loader2 size={12} className="spin" /> Aranıyor...</span>}
+        {status === 'done' && <span className="action-status done"><Check size={12} /> Tamamlandı</span>}
+        {status === 'rejected' && <span className="action-status rejected">İptal edildi</span>}
+        {status === 'error' && <span className="action-status error"><AlertTriangle size={12} /> {state.error || 'Hata'}</span>}
+      </div>
+      {status === 'done' && result && !continued && (
+        <div className="terminal-continue-bar" style={{ marginTop: 0, borderTop: 'none', borderBottomRightRadius: '6px', borderBottomLeftRadius: '6px' }}>
+          <button className="terminal-continue-btn" onClick={() => onContinue(actionId, result, true)}>
+            <Check size={12} /> Devam Et (Sonuçları Gönder)
+          </button>
+        </div>
+      )}
+      {continued && (
+        <div className="terminal-continued-badge" style={{ marginTop: '8px', padding: '0 8px 8px' }}>
+          <Check size={11} /> Sonuçlar değerlendirildi
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ERROR_PATTERNS = ['Error:', 'error:', 'ERR!', 'EADDRINUSE', 'MODULE_NOT_FOUND', 'Cannot find module', 'SyntaxError', 'TypeError', 'ReferenceError', 'ENOENT', 'command not found', 'is not recognized', 'hata', 'bulunamadı', 'başarısız'];
 const SUCCESS_PATTERNS = ['listening on', 'ready', 'started', 'running on', 'compiled', 'Local:', 'http://localhost', 'http://127.0.0.1', 'Server running', 'serving', 'VITE', 'webpack compiled', 'Successfully compiled', 'çalışıyor', 'portunda', 'dinliyor', 'başlatıldı', 'hazır', ':3000', ':3001', ':4000', ':5000', ':5173', ':8000', ':8080', ':8888'];
 
@@ -681,6 +730,8 @@ const MessageContent = ({ content, messageIndex, actionStates, onApprove, onReje
             return <DeleteActionBlock key={i} path={part.path} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} />;
           case 'mkdir_action':
             return <MkdirActionBlock key={i} path={part.path} actionId={actionId} state={state} />;
+          case 'web_action':
+            return <WebSearchActionBlock key={i} query={part.query} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} onContinue={onContinue} />;
           case 'terminal_action':
             return <TerminalActionBlock key={i} command={part.command} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} onContinue={onContinue} />;
           case 'edit_action':
@@ -858,18 +909,21 @@ Dosya/klasör/komut oluşturmak için AŞAĞIDAKİ ETİKETLERİ KULLAN. Köşeli
 - Terminal komutu: [CMD: komut]
 - Dosya düzenleme: [EDIT: yol/dosya.ext][OLD]eski[/OLD][NEW]yeni[/NEW][/EDIT]
 - Dosya silme: [DELETE_FILE: yol/dosya.ext]
+- İnternette Araştırma: [WEB: araştırmak istediğin konu]
 
 KRİTİK KURALLAR:
-1. HER MESAJDA YALNIZCA BİR [CMD: ...] etiketi kullan. Birden fazla komut gönderme. Komut sonucu sana otomatik bildirilecek.
+1. HER MESAJDA YALNIZCA BİR [CMD: ...] VEYA [WEB: ...] etiketi kullan. Birden fazla komut/arama gönderme. Komut veya arama sonucu sana otomatik olarak bildirilecek, lütfen bunu BEKLE!
 2. echo ile dosya oluşturma YAPMA. Bunun yerine [FILE: yol][/FILE] kullan.
 3. copy/cp ile dosya kopyalama yerine [FILE:] ile yeni dosyayı doğrudan oluştur.
 4. ASLA düz metin olarak "CMD: komut" yazma, MUTLAKA [CMD: komut] formatını kullan.
 5. Küçük değişiklikte [EDIT], büyük değişiklikte [FILE] kullan.
-6. Terminal komutu çalıştırdıktan sonra DUR ve sonucu bekle. Sonuç otomatik gelecek.
+6. [CMD: ...] veya [WEB: ...] etiketi yazdıktan SONRA cümleni bitir ve metin üretmeyi DURDUR. Arkasından başka komut yazma, benim cevabımı bekle.
 7. Markdown kod bloğu (\`\`\`bash ... \`\`\`) kullanma; bunun yerine [CMD: ...] kullan.
-8. [SİSTEM - Terminal çıktısı] mesajı aldığında sonucu analiz et ve sıradaki adımı belirle.
-9. Görev birden fazla adım gerektiriyorsa her adımdan sonra bir sonrakini belirle.
-10. AYNI BAŞARISIZ KOMUTU TEKRAR ÇALIŞTIRMA. Bir komut hata verdiyse, farklı bir yaklaşım veya farklı parametrelerle dene. Aynı komutu 2 kereden fazla deneme.`;
+8. [SİSTEM - Terminal çıktısı] veya [SİSTEM - Web Araması Sonuçları] mesajı aldığında DUR.
+9. ÖNCE Türkçe düz metin olarak kullanıcıyla KONUŞ, sonuçları detaylı şekilde SAYGI ÇERÇEVESİNDE anlat ve açıkla.
+10. KULLANICIYA YORUMLAMADAN ve düz metin ile açıklama yapmadan ASLA arka arkaya yeni bir arama ([WEB:...]) veya komut ([CMD:...]) GÖNDERME!
+11. Görev birden fazla adım gerektiriyorsa, önce ne bulduğunu/ne yaptığını açıkla, "şimdi sıradaki adıma geçiyorum" diyerek yeni etiketi yaz.
+12. AYNI BAŞARISIZ KOMUTU TEKRAR ÇALIŞTIRMA. Bir komut hata verdiyse, önce sorunu kullanıcıya anlat. Aynı komutu 2 kereden fazla deneme.`;
 
       const finalMessages = [{ role: 'system', content: systemPrompt }, ...systemMsgs, ...trimmedNonSys];
 
@@ -925,10 +979,16 @@ KRİTİK KURALLAR:
 
             assistantContent += delta;
 
-            // İlk [CMD:] veya bare CMD gelince akışı kes
-            const cmdTagMatch = assistantContent.match(/\[\s*CMD\s*:\s*([^\]]+?)\s*\]/i);
-            if (cmdTagMatch) {
-              assistantContent = assistantContent.slice(0, assistantContent.indexOf(cmdTagMatch[0]) + cmdTagMatch[0].length);
+            // İlk [CMD:] veya [WEB:] veya bare CMD gelince akışı KESİN OLARAK kes
+            const cmdTagMatch = assistantContent.match(/\[\s*CMD\s*:\s*([\s\S]+?)\s*\]/i);
+            const webTagMatch = assistantContent.match(/\[\s*WEB\s*:\s*([\s\S]+?)\s*\]/i);
+            
+            if (cmdTagMatch || webTagMatch) {
+              let firstMatch = cmdTagMatch;
+              if (!firstMatch || (webTagMatch && webTagMatch.index < firstMatch.index)) {
+                firstMatch = webTagMatch;
+              }
+              assistantContent = assistantContent.slice(0, firstMatch.index + firstMatch[0].length);
               stopAfterFirstCmd = true;
             }
 
@@ -1112,6 +1172,20 @@ KRİTİK KURALLAR:
           setTimeout(() => onFileChange?.(), 300);
           break;
         }
+        case 'web_action': {
+          if (!useBackend) throw new Error('Web araştırması özelliği sadece Masaüstü IDE (Backend) modunda çalışır.');
+          const res = await fetch('http://localhost:3001/api/search-web', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: action.query }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.error || 'Arama başarısız');
+          }
+          setActionStates(prev => ({ ...prev, [actionId]: { status: 'done', result: data.results || [] } }));
+          break;
+        }
         case 'terminal_action': {
           // Terminal kilidi al — paralel çalışmayı engelle
           terminalInProgressRef.current = true;
@@ -1245,6 +1319,8 @@ KRİTİK KURALLAR:
       setActionStates(prev => ({ ...prev, [actionId]: { status: 'rejected' } }));
       if (action?.type === 'terminal_action') {
         handleSendRef.current(`[SİSTEM: Kullanıcı \`${action.command}\` komutunu çalıştırmayı reddetti (Atlandı). Lütfen duruma göre alternatif bir komut veya yöntem öner.]`);
+      } else if (action?.type === 'web_action') {
+         handleSendRef.current(`[SİSTEM: Kullanıcı web aramasını (\`${action.query}\`) yapmayı reddetti.]`);
       }
     }
   }, [currentDirPath, onFileChange]);
@@ -1259,6 +1335,16 @@ KRİTİK KURALLAR:
       ...prev,
       [actionId]: { ...prev[actionId], continued: isSuccess ? 'continue' : 'error' },
     }));
+
+    // Web araması sonucu ayrıştırma
+    if (Array.isArray(result)) {
+      const resultsText = result.length > 0 
+        ? result.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description}`).join('\n\n')
+        : 'Sonuç bulunamadı.';
+      const feedbackMsg = `[SİSTEM - Web Araması Sonuçları]\n${resultsText}\n\nLütfen KESİNLİKLE yukarıdaki bulguları DÜZ METİN OLARAK TÜRKÇE anlat ve açıkla. KULLANICIYA YORUMLAMADAN yeni bir komut ([CMD:...]) veya arama ([WEB:...]) başlatma!`;
+      handleSendRef.current(feedbackMsg);
+      return;
+    }
 
     // Dosya okuma tespiti
     const [, msgIdxStr] = actionId.match(/^msg-(\d+)-/) || [];
@@ -1299,6 +1385,7 @@ KRİTİK KURALLAR:
         if (pi !== undefined) {
           const pt = pp[parseInt(pi, 10)];
           if (pt?.type === 'terminal_action') executedCommand = pt.command || '';
+          if (pt?.type === 'web_action') executedCommand = pt.query || '';
         }
       }
     }
