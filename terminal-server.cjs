@@ -4,8 +4,26 @@ const { spawn } = require('child_process');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 
-const PORT = 3001;
+const PORT = Number(process.env.STACKMATE_PORT || 3001);
+const LM_STUDIO_PORT = Number(process.env.LM_STUDIO_PORT || 1234);
+const ALLOWED_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
+let projectRoot = null;
+const withinRoot = (target, root) => {
+  if (!root || typeof target !== 'string') return false;
+  try {
+    const resolved = path.resolve(target);
+    const relative = path.relative(root, resolved);
+    if (!(relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)))) return false;
+    let existing = resolved;
+    while (!fs.existsSync(existing)) existing = path.dirname(existing);
+    const real = fs.realpathSync(existing);
+    const realRelative = path.relative(root, real);
+    return realRelative === '' || (realRelative !== '..' && !realRelative.startsWith('..' + path.sep) && !path.isAbsolute(realRelative));
+  } catch { return false; }
+};
+const withinProject = (target) => withinRoot(target, projectRoot);
 const PLATFORM = os.platform(); // 'darwin' | 'linux' | 'win32'
 const HOME = os.homedir();
 const USER = os.userInfo().username;
@@ -20,7 +38,31 @@ const SHELL = getShell();
 
 // Agent process yönetimi (uzun süren komutlar için)
 const agentProcesses = new Map();
+const stagedChanges = new Map();
+const stageStoreDir = path.join(PLATFORM === 'win32'
+  ? (process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'))
+  : (process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state')),
+'StackMate', 'staged-changes');
+fs.mkdirSync(stageStoreDir, { recursive: true, mode: 0o700 });
+const stageRecordPath = (token) => path.join(stageStoreDir, `${token}.json`);
+for (const filename of fs.readdirSync(stageStoreDir)) {
+  if (!/^[0-9a-f-]{36}\.json$/i.test(filename)) continue;
+  try {
+    const record = JSON.parse(fs.readFileSync(path.join(stageStoreDir, filename), 'utf8'));
+    if (typeof record.filePath === 'string' && typeof record.root === 'string' && typeof record.after === 'string') {
+      stagedChanges.set(filename.slice(0, -5), record);
+    }
+  } catch { /* geçersiz kayıtları yok say */ }
+}
 let agentProcCounter = 1;
+const killAgentProcess = (proc) => {
+  if (!proc?.pid) return;
+  if (PLATFORM === 'win32') {
+    spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true });
+  } else {
+    proc.kill('SIGTERM');
+  }
+};
 
 // Komutu platforma göre çalıştır
 const spawnCommand = (cmd, cwd) => {
@@ -48,10 +90,16 @@ const c = {
 };
 
 // ─── HTTP API — Dosya sistemi işlemleri (Brave/Firefox fallback) ─────────
-const parseBody = (req) => new Promise((resolve, reject) => {
+const parseBody = (req) => req.parsedBody ? Promise.resolve(req.parsedBody) : new Promise((resolve, reject) => {
   let body = '';
-  req.on('data', chunk => body += chunk);
+  let tooLarge = false;
+  req.on('data', chunk => {
+    if (tooLarge) return;
+    body += chunk;
+    if (body.length > 10 * 1024 * 1024) { body = ''; tooLarge = true; }
+  });
   req.on('end', () => {
+    if (tooLarge) { resolve({}); return; }
     try { resolve(JSON.parse(body)); }
     catch (_) { resolve({}); }
   });
@@ -102,7 +150,9 @@ const readDirTreeDeep = (dirPath) => {
 
 const server = createServer(async (req, res) => {
   // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (origin && !ALLOWED_ORIGINS.has(origin)) { res.writeHead(403); res.end(); return; }
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
@@ -110,6 +160,37 @@ const server = createServer(async (req, res) => {
     res.writeHead(200);
     res.end();
     return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/project-root') {
+    const body = await parseBody(req);
+    if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) { res.writeHead(400); res.end(); return; }
+    try {
+      const root = fs.realpathSync(body.path);
+      if (!fs.statSync(root).isDirectory()) throw new Error('Dizin değil');
+      projectRoot = root;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ path: root }));
+    } catch (err) { res.writeHead(400); res.end(JSON.stringify({ error: err.message })); }
+    return;
+  }
+
+  const guardedPaths = {
+    '/api/read-dir': ['path'], '/api/read-subdir': ['path'], '/api/read-file': ['path'],
+    '/api/save-file': ['path'], '/api/edit-file': ['path'], '/api/rename': ['oldPath', 'newPath'],
+    '/api/delete': ['path'], '/api/delete-file': ['path'], '/api/mkdir': ['path'],
+    '/api/agent-stage': ['path'],
+    '/api/agent-exec': ['cwd'], '/api/agent-run': ['cwd'],
+  };
+  if (req.method === 'POST' && guardedPaths[req.url]) {
+    const body = await parseBody(req);
+    if (guardedPaths[req.url].some(key => !withinProject(body[key]))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'İşlem etkin proje dizini dışında' }));
+      return;
+    }
+    // Reuse the parsed body in the endpoint below.
+    req.parsedBody = body;
   }
 
   // ─── API: İşletim sistemi (agent için tek bağlam bilgisi) ─────────────
@@ -148,6 +229,82 @@ const server = createServer(async (req, res) => {
   }
 
   // ─── API: Dosya kaydet ──────────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/agent-stage') {
+    const { path: filePath, type, content, oldText, newText } = await parseBody(req);
+    try {
+      if (!['file', 'edit'].includes(type)) throw new Error('Geçersiz işlem türü');
+      const existed = fs.existsSync(filePath);
+      if (existed && !fs.statSync(filePath).isFile()) throw new Error('Hedef normal dosya değil');
+      if (type === 'edit' && !existed) throw new Error('Düzenlenecek dosya bulunamadı');
+      const before = existed ? fs.readFileSync(filePath, 'utf8') : null;
+      let after;
+      if (type === 'file') {
+        if (typeof content !== 'string') throw new Error('Dosya içeriği geçersiz');
+        after = content;
+      } else {
+        if (typeof oldText !== 'string' || !oldText || typeof newText !== 'string') throw new Error('Düzenleme metni geçersiz');
+        if (before.split(oldText).length === 2) {
+          after = before.replace(oldText, newText);
+        } else if (before.replace(/\r\n/g, '\n').trim() === oldText.replace(/\r\n/g, '\n').trim()) {
+          const newline = before.includes('\r\n') ? '\r\n' : '\n';
+          after = newText.replace(/\r\n/g, '\n').replace(/\n/g, newline);
+          if (before.endsWith(newline) && !after.endsWith(newline)) after += newline;
+        } else {
+          throw new Error('Eski metin dosyada tam olarak bir kez bulunmalı');
+        }
+      }
+      const token = randomUUID();
+      const record = { filePath, before, after, existed, root: projectRoot, type, oldText, newText };
+      fs.writeFileSync(stageRecordPath(token), JSON.stringify(record), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      try {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, after, 'utf8');
+      } catch (error) {
+        fs.rmSync(stageRecordPath(token), { force: true });
+        throw error;
+      }
+      stagedChanges.set(token, record);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ token, created: !existed }));
+    } catch (err) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/agent-pending') {
+    const pending = [...stagedChanges.entries()]
+      .filter(([, change]) => change.root === projectRoot && withinProject(change.filePath))
+      .map(([token, change]) => ({ token, path: change.filePath, type: change.type || 'file', content: change.after, oldText: change.oldText, newText: change.newText }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ pending }));
+    return;
+  }
+
+  if (req.method === 'POST' && ['/api/agent-commit', '/api/agent-revert'].includes(req.url)) {
+    const { token } = await parseBody(req);
+    const change = stagedChanges.get(token);
+    if (!change) { res.writeHead(404); res.end(JSON.stringify({ error: 'Bekleyen değişiklik bulunamadı' })); return; }
+    try {
+      if (req.url === '/api/agent-revert') {
+        if (!withinRoot(change.filePath, change.root) || !fs.existsSync(change.filePath) || fs.readFileSync(change.filePath, 'utf8') !== change.after) {
+          throw new Error('Dosya sonradan değişti; geri alma uygulanmadı');
+        }
+        if (change.existed) fs.writeFileSync(change.filePath, change.before, 'utf8');
+        else fs.unlinkSync(change.filePath);
+      }
+      fs.unlinkSync(stageRecordPath(token));
+      stagedChanges.delete(token);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (err) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/api/save-file') {
     const body = await parseBody(req);
     const filePath = body.path;
@@ -175,7 +332,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/api/edit-file') {
     const body = await parseBody(req);
     const { path: filePath, oldText, newText } = body;
-    if (!filePath || oldText === undefined || newText === undefined) {
+    if (!filePath || typeof oldText !== 'string' || !oldText || typeof newText !== 'string') {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'path, oldText ve newText gerekli' }));
       return;
@@ -190,6 +347,11 @@ const server = createServer(async (req, res) => {
       const norm = (s) => (s || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       let newContent;
       if (content.includes(oldText)) {
+        if (content.split(oldText).length !== 2) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Eski metin birden fazla yerde bulunuyor' }));
+          return;
+        }
         newContent = content.replace(oldText, newText);
       } else {
         const contentNorm = norm(content);
@@ -197,6 +359,11 @@ const server = createServer(async (req, res) => {
         if (!contentNorm.includes(oldNorm)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Eski metin dosyada bulunamadı' }));
+          return;
+        }
+        if (contentNorm.split(oldNorm).length !== 2) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Eski metin birden fazla yerde bulunuyor' }));
           return;
         }
         newContent = contentNorm.replace(oldNorm, norm(newText));
@@ -330,7 +497,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url.startsWith('/api/fs-watch')) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const watchPath = url.searchParams.get('path');
-    if (!watchPath || !fs.existsSync(watchPath)) {
+    if (!withinProject(watchPath) || !fs.existsSync(watchPath)) {
       res.writeHead(400); res.end(); return;
     }
 
@@ -338,7 +505,7 @@ const server = createServer(async (req, res) => {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*'
+      'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173'
     });
 
     res.write('retry: 1000\n\n');
@@ -497,9 +664,10 @@ const server = createServer(async (req, res) => {
       const http = require('http');
       const postData = JSON.stringify(body);
 
+      let upstreamResponse;
       const proxyReq = http.request({
         hostname: '127.0.0.1',
-        port: 1234,
+        port: LM_STUDIO_PORT,
         path: '/v1/chat/completions',
         method: 'POST',
         headers: {
@@ -507,10 +675,11 @@ const server = createServer(async (req, res) => {
           'Content-Length': Buffer.byteLength(postData),
         },
       }, (proxyRes) => {
+        upstreamResponse = proxyRes;
         // Streaming header'larını kopyala
         res.writeHead(proxyRes.statusCode, {
           'Content-Type': proxyRes.headers['content-type'] || 'text/event-stream',
-          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
         });
@@ -519,8 +688,16 @@ const server = createServer(async (req, res) => {
       });
 
       proxyReq.on('error', (err) => {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
+        if (res.destroyed) return;
+        if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'LM Studio bağlantı hatası: ' + err.message }));
+      });
+
+      res.on('close', () => {
+        if (!res.writableEnded) {
+          upstreamResponse?.destroy();
+          proxyReq.destroy();
+        }
       });
 
       proxyReq.write(postData);
@@ -538,13 +715,13 @@ const server = createServer(async (req, res) => {
       const http = require('http');
       const proxyReq = http.request({
         hostname: '127.0.0.1',
-        port: 1234,
+        port: LM_STUDIO_PORT,
         path: '/v1/models',
         method: 'GET',
       }, (proxyRes) => {
         res.writeHead(proxyRes.statusCode, {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173',
         });
         proxyRes.pipe(res);
       });
@@ -559,73 +736,6 @@ const server = createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
     }
-    return;
-  }
-
-  // ─── API: Klasör Yolu Çözümleme (otomatik) ─────────────────────────
-  if (req.method === 'POST' && req.url === '/api/resolve-folder') {
-    const body = await parseBody(req);
-    const folderName = body.name;
-    if (!folderName) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'name gerekli' }));
-      return;
-    }
-
-    // Yaygın konumlarda ara
-    const searchRoots = [
-      HOME,
-      path.join(HOME, 'Desktop'),
-      path.join(HOME, 'Documents'),
-      path.join(HOME, 'Downloads'),
-      path.join(HOME, 'Documents', 'GitHub'),
-      path.join(HOME, 'GitHub'),
-      path.join(HOME, 'Projects'),
-      path.join(HOME, 'repos'),
-      path.join(HOME, 'source'),
-    ];
-
-    let foundPath = null;
-
-    const searchDir = (dir, depth) => {
-      if (foundPath || depth > 3) return;
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isDirectory()) continue;
-          if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-          const full = path.join(dir, entry.name);
-          if (entry.name === folderName) {
-            foundPath = full;
-            return;
-          }
-          if (depth < 3) searchDir(full, depth + 1);
-          if (foundPath) return;
-        }
-      } catch (_) { /* erişim hatası — atla */ }
-    };
-
-    // Önce direkt kontrol (kök dizinlerde)
-    for (const root of searchRoots) {
-      const direct = path.join(root, folderName);
-      try {
-        if (fs.existsSync(direct) && fs.statSync(direct).isDirectory()) {
-          foundPath = direct;
-          break;
-        }
-      } catch (_) { }
-    }
-
-    // Bulunamadıysa derinlemesine ara
-    if (!foundPath) {
-      for (const root of searchRoots) {
-        searchDir(root, 0);
-        if (foundPath) break;
-      }
-    }
-
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ path: foundPath }));
     return;
   }
 
@@ -651,7 +761,7 @@ const server = createServer(async (req, res) => {
         exitCode = typeof error.code === 'number' ? error.code : 1;
         if (error.killed) stderr = (stderr || '') + '\n[Komut zaman aşımına uğradı]';
       }
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173' });
       res.end(JSON.stringify({
         exitCode,
         stdout: (stdout || '').slice(-10000),
@@ -684,12 +794,17 @@ const server = createServer(async (req, res) => {
     let stderr = '';
     let exitCode = null;
     let running = true;
+    let wasKilled = false;
 
-    const proc = spawnCommand(command, execCwd || process.cwd());
+    const proc = spawnCommand(command, execCwd);
 
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
-    proc.on('close', (code) => { exitCode = code ?? 0; running = false; });
+    proc.stdout.on('data', (d) => { stdout = (stdout + d.toString()).slice(-10000); });
+    proc.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-5000); });
+    proc.on('close', (code) => {
+      exitCode = wasKilled ? 130 : (code ?? 1);
+      running = false;
+      setTimeout(() => agentProcesses.delete(procId), 5 * 60 * 1000);
+    });
     proc.on('error', (e) => { stderr += '\n' + e.message; running = false; exitCode = 1; });
 
     agentProcesses.set(procId, {
@@ -698,19 +813,11 @@ const server = createServer(async (req, res) => {
       getStderr: () => stderr,
       getExitCode: () => exitCode,
       isRunning: () => running,
+      markKilled: () => { wasKilled = true; },
       startTime: Date.now(),
     });
 
-    // 5 dakika sonra otomatik temizle (sızıntı önleme)
-    setTimeout(() => {
-      const p = agentProcesses.get(procId);
-      if (p) {
-        try { p.proc.kill('SIGTERM'); } catch (_) { }
-        agentProcesses.delete(procId);
-      }
-    }, 5 * 60 * 1000);
-
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173' });
     res.end(JSON.stringify({ procId }));
     return;
   }
@@ -725,7 +832,7 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'Process bulunamadı' }));
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173' });
     res.end(JSON.stringify({
       running: p.isRunning(),
       stdout: p.getStdout().slice(-10000),
@@ -741,17 +848,17 @@ const server = createServer(async (req, res) => {
     const { procId } = body;
     const p = agentProcesses.get(procId);
     if (p) {
-      try { p.proc.kill('SIGTERM'); } catch (_) { }
-      agentProcesses.delete(procId);
+      p.markKilled();
+      try { killAgentProcess(p.proc); } catch (_) { }
     }
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173' });
     res.end(JSON.stringify({ ok: true }));
     return;
   }
 
   res.end('Terminal OK');
 });
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, verifyClient: ({ req }) => ALLOWED_ORIGINS.has(req.headers.origin) });
 
 // ─── Her bağlantı için ayrı state ──────────────────────────────────────────
 wss.on('connection', (ws) => {
@@ -1028,8 +1135,19 @@ server.on('error', (e) => {
   throw e;
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`Terminal backend: http://localhost:${PORT}`);
   console.log(`Platform: ${PLATFORM} | Shell: ${SHELL}`);
   console.log('WebSocket hazır');
 });
+
+const shutdown = () => {
+  for (const entry of agentProcesses.values()) {
+    if (entry.isRunning()) killAgentProcess(entry.proc);
+  }
+  wss.clients.forEach(client => client.terminate());
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
+};
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);

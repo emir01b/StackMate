@@ -9,6 +9,7 @@
     "dev:all": "concurrently \"npm run dev\" \"npm run terminal\"",
     "build": "vite build",
     "lint": "eslint .",
+    "test": "node --test tests/*.cjs",
     "preview": "vite preview"
   },
   "dependencies": {

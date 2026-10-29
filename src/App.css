@@ -70,6 +70,50 @@
   overflow: hidden;
 }
 
+.folder-path-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.66);
+}
+
+.folder-path-dialog {
+  width: min(460px, calc(100vw - 32px));
+  padding: 22px;
+  border: 1px solid #39475b;
+  border-radius: 10px;
+  background: #202937;
+  color: #e9eef5;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+.folder-path-dialog h2 { margin: 0 0 8px; font-size: 17px; }
+.folder-path-dialog p { margin: 0 0 16px; color: #b4c0ce; font-size: 13px; }
+.folder-path-dialog input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #546987;
+  border-radius: 6px;
+  background: #121b27;
+  color: #fff;
+  font: inherit;
+}
+.folder-path-dialog .folder-path-error { color: #ff9a96; margin: 10px 0 0; }
+.folder-path-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.folder-path-actions button {
+  padding: 8px 14px;
+  border: 1px solid #50617a;
+  border-radius: 6px;
+  background: #324157;
+  color: #fff;
+  cursor: pointer;
+}
+.folder-path-actions button[type="submit"] { background: #126cb0; border-color: #1985d5; }
+.folder-path-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ─── Scrollbar ─── */
 ::-webkit-scrollbar {
   width: 8px;

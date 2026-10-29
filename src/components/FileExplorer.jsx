@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Edit3, Trash2, FilePlus, FolderPlus } from 'lucide-react';
-import { apiReadFile } from '../utils/fileApi';
+import { apiReadFile, apiReadSubdir } from '../utils/fileApi';
 import './FileExplorer.css';
 
 const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete, onNewFile, onNewFolder, currentDirPath }) => {
@@ -10,25 +10,29 @@ const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete
 
   useEffect(() => {
     if (customFiles) {
-      setFileStructure(customFiles);
+      setFileStructure({ ...customFiles, loaded: true });
       setExpanded(new Set([customFiles.name]));
     } else {
       setFileStructure(null);
     }
   }, [customFiles]);
 
-  const loadFolderContents = async (node, path) => {
-    // Handle yoksa (fallback mod) veya children zaten varsa atla
-    if (!node.handle || node.children.length > 0) return;
+  const loadFolderContents = async (node, nodePath) => {
+    if (node.loaded || node.children?.length > 0) return;
     try {
-      const entries = [];
-      for await (const entry of node.handle.values()) {
-        entries.push({
-          name: entry.name,
-          type: entry.kind === 'directory' ? 'folder' : 'file',
-          handle: entry,
-          ...(entry.kind === 'directory' && { children: [] }),
-        });
+      let entries = [];
+      if (node.handle) {
+        for await (const entry of node.handle.values()) {
+          entries.push({
+            name: entry.name,
+            type: entry.kind === 'directory' ? 'folder' : 'file',
+            handle: entry,
+            ...(entry.kind === 'directory' && { children: [] }),
+          });
+        }
+      } else if (currentDirPath) {
+        const relative = nodePath.split('/').slice(1).join('\\');
+        entries = (await apiReadSubdir(currentDirPath + '\\' + relative)).children;
       }
       entries.sort((a, b) => {
         if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
@@ -36,24 +40,12 @@ const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete
       });
 
       setFileStructure(prev => {
-        const updateNode = (node) => {
-          if (node.handle === entries[0]?.handle?.parent) return node;
-          const lastName = path.split('/').pop();
-          if (node.name === lastName && node.type === 'folder') {
-            return { ...node, children: entries };
-          }
-          if (node.children) {
-            return { ...node, children: node.children.map(updateNode) };
-          }
-          return node;
-        };
-        // Daha güvenilir: handle referansı ile eşleştir
-        const updateByHandle = (current) => {
-          if (current.handle === node.handle) return { ...current, children: entries };
-          if (current.children) return { ...current, children: current.children.map(updateByHandle) };
+        const updateByPath = (current, path) => {
+          if (path === nodePath) return { ...current, children: entries, loaded: true };
+          if (current.children) return { ...current, children: current.children.map(child => updateByPath(child, `${path}/${child.name}`)) };
           return current;
         };
-        return updateByHandle(prev);
+        return updateByPath(prev, prev.name);
       });
     } catch (err) {
       console.error('Klasör yüklenemedi:', err.message);
@@ -79,7 +71,7 @@ const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete
       try {
         const file = await node.handle.getFile();
         const content = await file.text();
-        onFileSelect({ name: node.name, content, handle: node.handle });
+        onFileSelect({ name: node.name, path: nodePath, content, handle: node.handle });
       } catch (err) {
         console.error('Dosya okunamadı:', err.message);
         alert('Dosya okunamadı: ' + err.message);
@@ -88,7 +80,7 @@ const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete
       // Fallback — <input webkitdirectory> ile gelen File nesnesi
       try {
         const content = await node._file.text();
-        onFileSelect({ name: node.name, content, handle: null, _file: node._file });
+        onFileSelect({ name: node.name, path: nodePath, content, handle: null, _file: node._file });
       } catch (err) {
         console.error('Dosya okunamadı:', err.message);
         alert('Dosya okunamadı: ' + err.message);
@@ -101,13 +93,13 @@ const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete
         const relativePath = parts.join('\\');
         const fullPath = currentDirPath + '\\' + relativePath;
         const result = await apiReadFile(fullPath);
-        onFileSelect({ name: node.name, content: result.content, handle: null });
+        onFileSelect({ name: node.name, path: nodePath, content: result.content, handle: null });
       } catch (err) {
         console.error('Dosya okunamadı:', err.message);
         alert('Dosya okunamadı: ' + err.message);
       }
     } else {
-      onFileSelect({ name: node.name, content: node.content || '' });
+      onFileSelect({ name: node.name, path: nodePath, content: node.content || '' });
     }
   };
 
@@ -153,7 +145,7 @@ const FileExplorer = ({ onFileSelect, customFiles, onRefresh, onRename, onDelete
           <div>
             {node.children.length === 0 ? (
               <div style={{ paddingLeft: `${(level + 1) * 16 + 24}px`, fontSize: '12px', color: '#858585', padding: '4px 8px' }}>
-                Yükleniyor...
+                {node.loaded ? 'Boş klasör' : 'Yükleniyor...'}
               </div>
             ) : (
               node.children.map((child, index) => (

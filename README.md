@@ -40,8 +40,12 @@ npm install
 npm run dev:all
 ```
 
+Kalite kontrolleri: `npm run lint`, `npm test`, `npm run build`.
+
 - Uygulama (IDE): `http://localhost:5173`  
 - Terminal ve dosya backend: `http://localhost:3001`
+
+LM Studio için varsayılan port `1234` olarak ayarlanmıştır. Farklı bir port kullanıyorsanız backend'i `LM_STUDIO_PORT` ortam değişkeniyle başlatın.
 
 > **Not:** Terminal ve AI özellikleri için hem Vite hem de `terminal-server.cjs` aynı anda çalışmalıdır.
 
@@ -147,6 +151,12 @@ AI paneli aksiyon başına otomatik seçim yapar:
 
 - Yol biliniyorsa → backend API  
 - Yol bilinmiyorsa ama handle varsa → File System Access API
+
+AI dosya ve klasör eylemleri uygulanmadan önce karttaki onay düğmesine basılmalıdır. Var olan bir dosyanın üzerine yazmadan önce ayrıca onay istenir. Terminal komutları için seçilen proje klasörünün tam yolunu kullanıcı girer; backend işlemleri yalnızca bu dizinde kabul eder. Yol girilmezse tarayıcı dosya erişimiyle düzenleme kullanılabilir, terminal agent komutları kullanılamaz.
+
+Gömülü tarayıcıda yerel klasör seçici kullanılamazsa **File → Klasör Aç** bir yol giriş penceresi açar. Tam yol girildiğinde dosya ağacı backend üzerinden yüklenir.
+
+Uyumlu LM Studio modelleri yapılandırılmış araç çağrıları kullanır; diğer modeller için etiketli komut biçimi desteklenir. Terminal kartındaki uzun süren komutlar arka planda bırakılabilir veya durdurulabilir. Sohbeti temizlemek çalışan agent süreçlerine durdurma isteği gönderir.
 
 ---
 

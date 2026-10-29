@@ -9,10 +9,10 @@ const TabBar = ({ tabs, activeTab, onTabClick, onTabClose }) => {
     <div className="tab-bar">
       {tabs.map((tab) => (
         <div
-          key={tab.name}
-          className={`tab ${activeTab === tab.name ? 'active' : ''} ${tab.modified ? 'modified' : ''}`}
+          key={tab.id}
+          className={`tab ${activeTab === tab.id ? 'active' : ''} ${tab.modified ? 'modified' : ''}`}
           onClick={() => onTabClick(tab)}
-          title={tab.name}
+          title={tab.path || tab.name}
         >
           <span className="tab-name">{tab.name}</span>
           {tab.modified && <span className="tab-dot">●</span>}
