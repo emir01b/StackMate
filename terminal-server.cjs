@@ -5,11 +5,12 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const { readSettings, publicSettings, updateSettings, activeConnection, endpointUrl } = require('./settings-store.cjs');
 
 const PORT = Number(process.env.STACKMATE_PORT || 3001);
-const LM_STUDIO_PORT = Number(process.env.LM_STUDIO_PORT || 1234);
 const ALLOWED_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
 let projectRoot = null;
+let appSettings = readSettings();
 const withinRoot = (target, root) => {
   if (!root || typeof target !== 'string') return false;
   try {
@@ -657,22 +658,60 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ─── API: LM Studio proxy (CORS bypass) — chat completions ────────
+  // ─── API: Uygulama ayarları ────────────────────────────────────────
+  if (req.method === 'GET' && req.url === '/api/settings') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(publicSettings(appSettings)));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/settings') {
+    try {
+      appSettings = updateSettings(appSettings, await parseBody(req));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(publicSettings(appSettings)));
+    } catch (error) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/settings/test') {
+    try {
+      const { base, apiKey } = activeConnection(appSettings);
+      const upstream = await fetch(endpointUrl(base, 'models'), {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!upstream.ok) throw new Error(`Model listesi alınamadı (${upstream.status})`);
+      const data = await upstream.json();
+      const models = Array.isArray(data.data) ? data.data.map(model => model.id).filter(Boolean) : [];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, models }));
+    } catch (error) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // ─── API: OpenAI uyumlu chat proxy ────────────────────────────────
   if (req.method === 'POST' && req.url === '/api/ai-chat') {
     const body = await parseBody(req);
     try {
-      const http = require('http');
-      const postData = JSON.stringify(body);
+      const { base, apiKey } = activeConnection(appSettings);
+      const upstreamUrl = endpointUrl(base, 'chat/completions');
+      const transport = require(upstreamUrl.protocol === 'https:' ? 'https' : 'http');
+      const postData = JSON.stringify({ ...body, model: body.model || appSettings.ai.model });
 
       let upstreamResponse;
-      const proxyReq = http.request({
-        hostname: '127.0.0.1',
-        port: LM_STUDIO_PORT,
-        path: '/v1/chat/completions',
+      const proxyReq = transport.request(upstreamUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(postData),
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         },
       }, (proxyRes) => {
         upstreamResponse = proxyRes;
@@ -700,6 +739,7 @@ const server = createServer(async (req, res) => {
         }
       });
 
+      proxyReq.setTimeout(600000, () => proxyReq.destroy(new Error('Model yanıtı zaman aşımına uğradı')));
       proxyReq.write(postData);
       proxyReq.end();
     } catch (err) {
@@ -709,32 +749,29 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ─── API: LM Studio proxy — model listesi ────────────────────────
+  // ─── API: Aktif sağlayıcı model listesi ───────────────────────────
   if (req.method === 'GET' && req.url === '/api/ai-models') {
     try {
-      const http = require('http');
-      const proxyReq = http.request({
-        hostname: '127.0.0.1',
-        port: LM_STUDIO_PORT,
-        path: '/v1/models',
-        method: 'GET',
-      }, (proxyRes) => {
-        res.writeHead(proxyRes.statusCode, {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173',
-        });
-        proxyRes.pipe(res);
+      const { base, apiKey } = activeConnection(appSettings);
+      const upstream = await fetch(endpointUrl(base, 'models'), {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        signal: AbortSignal.timeout(10000),
       });
-
-      proxyReq.on('error', (err) => {
+      if (!upstream.ok) throw new Error(`Model listesi alınamadı (${upstream.status})`);
+      const data = await upstream.json();
+      const models = Array.isArray(data.data) ? data.data : [];
+      if (appSettings.ai.provider === 'remote' && appSettings.ai.model && !models.some(model => model.id === appSettings.ai.model)) models.unshift({ id: appSettings.ai.model });
+      const selectedModel = models.some(model => model.id === appSettings.ai.model) ? appSettings.ai.model : models[0]?.id || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ data: models, selectedModel }));
+    } catch (error) {
+      if (appSettings.ai.provider === 'remote' && appSettings.ai.model) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: appSettings.ai.model }], selectedModel: appSettings.ai.model, warning: error.message }));
+      } else {
         res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'LM Studio bağlantı hatası: ' + err.message }));
-      });
-
-      proxyReq.end();
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
+        res.end(JSON.stringify({ error: error.message }));
+      }
     }
     return;
   }

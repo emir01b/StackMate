@@ -5,6 +5,7 @@ import FileExplorer from './components/FileExplorer';
 import CodeEditor from './components/CodeEditor';
 import TabBar from './components/TabBar';
 import AIPanel from './components/AIPanel';
+import SettingsPanel from './components/SettingsPanel';
 import Terminal from './components/Terminal';
 import ErrorBoundary from './components/ErrorBoundary';
 import ResizeHandle from './components/ResizeHandle';
@@ -91,6 +92,29 @@ function App() {
   const [folderPathDialogOpen, setFolderPathDialogOpen] = useState(false);
   const [folderPathDraft, setFolderPathDraft] = useState('');
   const [folderPathError, setFolderPathError] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState(null);
+
+  useEffect(() => {
+    const refresh = () => fetch('http://localhost:3001/api/settings')
+      .then(response => response.ok ? response.json() : Promise.reject(new Error('Ayarlar alınamadı')))
+      .then(setSettings)
+      .catch(error => console.warn(error.message));
+    refresh();
+    window.addEventListener('stackmate-settings-changed', refresh);
+    return () => window.removeEventListener('stackmate-settings-changed', refresh);
+  }, []);
+
+  const saveSettings = useCallback(async (nextSettings) => {
+    const response = await fetch('http://localhost:3001/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(nextSettings),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Ayarlar kaydedilemedi');
+    setSettings(data);
+    window.dispatchEvent(new Event('stackmate-settings-changed'));
+    return data;
+  }, []);
 
   // Tab sistemi
   const [openTabs, setOpenTabs] = useState([]); // [{ name, content, handle, modified }]
@@ -779,7 +803,7 @@ function App() {
 
   // ─── RENDER ───────────────────────────────────────────────────────────────
   return (
-    <div className="app-root">
+    <div className={`app-root density-${settings?.appearance?.density || 'comfortable'} accent-${settings?.appearance?.accent || 'blue'}`}>
       <Navbar
         onFileAction={handleFileAction}
         onViewAction={handleViewAction}
@@ -787,7 +811,11 @@ function App() {
         showExplorer={showExplorer}
         showTerminal={showTerminal}
         showAI={showAI}
+        onSettings={() => setSettingsOpen(value => !value)}
+        settingsOpen={settingsOpen}
       />
+
+      {settingsOpen && <SettingsPanel settings={settings} onSave={saveSettings} onClose={() => setSettingsOpen(false)} />}
 
       {/* Gizli fallback input'lar — tüm tarayıcılar için */}
       <input
@@ -865,6 +893,7 @@ function App() {
                   currentDirPath={currentDirPath}
                   onCursorChange={setCursorPos}
                   onEditorMount={handleEditorMount}
+                  editorSettings={settings?.editor}
                 />
               </ErrorBoundary>
             </div>

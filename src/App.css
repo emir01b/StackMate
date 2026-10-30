@@ -7,6 +7,25 @@
   background-color: #141414;
 }
 
+.app-root.accent-blue { --sm-accent: #83a9c9; --sm-accent-bg: #29445d; --sm-status: #315d7e; }
+.app-root.accent-violet { --sm-accent: #ad9bcc; --sm-accent-bg: #443955; --sm-status: #57496e; }
+.app-root.accent-teal { --sm-accent: #83bbb4; --sm-accent-bg: #2b4c49; --sm-status: #356b68; }
+.app-root .status-bar { background: var(--sm-status); }
+.app-root .navbar-action-btn.ai-btn,
+.app-root .navbar-action-btn.ai-btn.active,
+.app-root .header-icon,
+.app-root .assistant-message .message-author-icon { color: var(--sm-accent); }
+.app-root .file-tree-node.selected { background: var(--sm-accent-bg); }
+.app-root .input-wrapper:focus-within { border-color: var(--sm-accent); }
+.app-root.density-compact .navbar { height: 27px; }
+.app-root.density-compact .navbar-menu,
+.app-root.density-compact .navbar-item,
+.app-root.density-compact .navbar-label,
+.app-root.density-compact .navbar-logo { height: 27px; }
+.app-root.density-compact .file-tree-node { padding-top: 1px; padding-bottom: 1px; }
+.app-root.density-compact .message { padding-top: 6px; padding-bottom: 6px; }
+.app-root.density-compact .file-explorer-header { height: 31px; }
+
 .app-main-wrapper {
   display: flex;
   flex-direction: row;

@@ -752,6 +752,8 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
   const [actionStates, setActionStates] = useState({});
   const [exploredFiles, setExploredFiles] = useState([]);
   const [exploredFilesOpen, setExploredFilesOpen] = useState(true);
+  const [agentSettings, setAgentSettings] = useState({ temperature: 0.2, maxTokens: 8192, autoContinue: true, maxAutoSteps: 20 });
+  const [settingsVersion, setSettingsVersion] = useState(0);
 
   const messagesEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
@@ -777,11 +779,26 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
   const isTypingRef = useRef(isTyping);
   const activeModelRef = useRef(activeModel);
   const inputRef = useRef(input);
+  const agentSettingsRef = useRef(agentSettings);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { isTypingRef.current = isTyping; }, [isTyping]);
   useEffect(() => { activeModelRef.current = activeModel; }, [activeModel]);
   useEffect(() => { inputRef.current = input; }, [input]);
+  useEffect(() => { agentSettingsRef.current = agentSettings; }, [agentSettings]);
   useEffect(() => { actionStatesRef.current = actionStates; }, [actionStates]);
+
+  useEffect(() => {
+    const refresh = () => {
+      fetch('http://localhost:3001/api/settings')
+        .then(response => response.ok ? response.json() : null)
+        .then(data => { if (data?.ai) setAgentSettings(data.ai); })
+        .catch(() => {});
+      setSettingsVersion(value => value + 1);
+    };
+    refresh();
+    window.addEventListener('stackmate-settings-changed', refresh);
+    return () => window.removeEventListener('stackmate-settings-changed', refresh);
+  }, []);
 
   useEffect(() => {
     if (!currentDirPath) return;
@@ -825,7 +842,8 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
           const models = data.data || [];
           setAvailableModels(models);
           setIsConnected(models.length > 0);
-          setActiveModel(current => models.some(model => model.id === current) ? current : models[0]?.id || null);
+          setActiveModel(current => data.selectedModel && models.some(model => model.id === data.selectedModel)
+            ? data.selectedModel : models.some(model => model.id === current) ? current : models[0]?.id || null);
         } else {
           setIsConnected(false);
           setActiveModel(null);
@@ -840,7 +858,7 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
     checkConnection();
     const interval = setInterval(checkConnection, CONNECTION_POLL_MS);
     return () => clearInterval(interval);
-  }, []);
+  }, [settingsVersion]);
 
   // ─── Otomatik scroll ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -986,10 +1004,9 @@ KRİTİK KURALLAR:
         body: JSON.stringify({
           model: activeModelRef.current,
           messages: finalMessages,
-          temperature: 0.2,
-          max_tokens: 8192,
-          tools: AGENT_TOOLS,
-          tool_choice: 'auto',
+          temperature: agentSettingsRef.current.temperature,
+          max_tokens: agentSettingsRef.current.maxTokens,
+          ...(agentSettingsRef.current.useNativeTools !== false ? { tools: AGENT_TOOLS, tool_choice: 'auto' } : {}),
           stream: true,
         }),
         signal: abortControllerRef.current.signal,
@@ -1406,7 +1423,8 @@ KRİTİK KURALLAR:
         }
       }
       if (!shouldContinue || autoStoppedRef.current || requestInFlightRef.current) return;
-      if (autoStepCountRef.current >= 20) {
+      if (!feedback && !agentSettingsRef.current.autoContinue) return;
+      if (autoStepCountRef.current >= agentSettingsRef.current.maxAutoSteps) {
         setMessages(prev => [...prev, { role: 'assistant', content: 'Otomatik işlem sınırına ulaştım. Devam etmemi isterseniz yazın.' }]);
         return;
       }
@@ -1657,14 +1675,24 @@ KRİTİK KURALLAR:
       </div>
 
       {isConnected === true && activeModel && (
-        <div className="model-info"><select aria-label="AI modeli" value={activeModel} onChange={e => setActiveModel(e.target.value)}>
+        <div className="model-info"><select aria-label="AI modeli" value={activeModel} onChange={async e => {
+          const model = e.target.value;
+          setActiveModel(model);
+          try {
+            const response = await fetch('http://localhost:3001/api/settings', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ai: { model } }),
+            });
+            if (!response.ok) throw new Error('Model seçimi kaydedilemedi');
+            window.dispatchEvent(new Event('stackmate-settings-changed'));
+          } catch (error) { console.warn(error.message); }
+        }}>
           {availableModels.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
         </select></div>
       )}
 
       {isConnected === false && (
         <div className="connection-warning">
-          LM Studio bağlantısı yok veya yüklü model bulunamadı. Local Server durumunu kontrol edin.
+          AI bağlantısı yok veya model bulunamadı. Ayarlar bölümünden sağlayıcı ve model adresini kontrol edin.
         </div>
       )}
 

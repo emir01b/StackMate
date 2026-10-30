@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import './Navbar.css';
 
-const Navbar = ({ onFileAction, onViewAction, projectName, showExplorer, showTerminal, showAI }) => {
+const Navbar = ({ onFileAction, onViewAction, onSettings, projectName, showExplorer, showTerminal, showAI, settingsOpen }) => {
   const [activeMenu, setActiveMenu] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const navbarRef = useRef(null);
@@ -227,10 +227,8 @@ const Navbar = ({ onFileAction, onViewAction, projectName, showExplorer, showTer
 
         {/* Ayarlar */}
         <button
-          className="navbar-action-btn"
-          onClick={() => {
-            alert('Ayarlar yakında eklenecek.\n\nMevcut kısayollar:\n• Ctrl+S — Kaydet\n• Ctrl+O — Dosya Aç\n• Ctrl+K Ctrl+O — Klasör Aç\n• Ctrl+F — Bul\n• Ctrl+H — Değiştir\n• Ctrl+` — Terminal\n• F11 — Tam Ekran');
-          }}
+          className={`navbar-action-btn ${settingsOpen ? 'active' : ''}`}
+          onClick={onSettings}
           title="Ayarlar"
         >
           <Settings size={16} />

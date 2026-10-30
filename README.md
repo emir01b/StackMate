@@ -45,7 +45,9 @@ Kalite kontrolleri: `npm run lint`, `npm test`, `npm run build`.
 - Uygulama (IDE): `http://localhost:5173`  
 - Terminal ve dosya backend: `http://localhost:3001`
 
-LM Studio için varsayılan port `1234` olarak ayarlanmıştır. Farklı bir port kullanıyorsanız backend'i `LM_STUDIO_PORT` ortam değişkeniyle başlatın.
+LM Studio için varsayılan port `1234` olarak ayarlanmıştır. Farklı bir port kullanıyorsanız **Ayarlar → AI bağlantısı** bölümünden yerel API adresini değiştirin. Uzak, OpenAI uyumlu bir API için aynı bölümde HTTPS taban adresini, model kimliğini ve API anahtarını girin. Bağlantıyı oradan test edebilirsiniz.
+
+Agent ve editör tercihleri de Ayarlar bölümünden yönetilir. API anahtarı tarayıcı depolamasına yazılmaz veya ayar yanıtında gösterilmez; backend tarafından kullanıcıya ait yerel ayar dosyasında saklanır (`%LOCALAPPDATA%\StackMate\settings.json` / `~/.config/StackMate/settings.json`). Bu yerel dosyada anahtar düz metindir; cihaz hesabınıza erişimi olan kişiler dosyayı okuyabilir.
 
 > **Not:** Terminal ve AI özellikleri için hem Vite hem de `terminal-server.cjs` aynı anda çalışmalıdır.
 

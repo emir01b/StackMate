@@ -1,4 +1,4 @@
-import React, { useRef, useCallback } from 'react';
+import React, { useRef, useCallback, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import { Save } from 'lucide-react';
 import { apiSaveFile } from '../utils/fileApi';
@@ -22,7 +22,7 @@ const getLanguage = (filename) => {
 
 const safeContent = (v) => (typeof v === 'string' ? v : '');
 
-const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorChange, onEditorMount }) => {
+const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorChange, onEditorMount, editorSettings }) => {
   const editorRef = useRef(null);
   const saveToastRef = useRef(null);
   const contentChangeTimerRef = useRef(null);
@@ -56,7 +56,8 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
       }
     } else if (file && currentDirPath) {
       try {
-        const filePath = currentDirPath + '\\' + file.name;
+        const relativePath = file.path ? file.path.split('/').slice(1).join('\\') : file.name;
+        const filePath = currentDirPath + '\\' + relativePath;
         await apiSaveFile(filePath, content);
         onSave?.(content);
         showToast('✓ Kaydedildi');
@@ -86,11 +87,13 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
 
   const handleEditorChange = useCallback((value) => {
     if (contentChangeTimerRef.current) clearTimeout(contentChangeTimerRef.current);
-    contentChangeTimerRef.current = setTimeout(() => {
-      onContentChange?.(value);
-      doSave(); // Otomatik kaydet
-    }, 1000);
-  }, [onContentChange, doSave]);
+    onContentChange?.(value);
+    if (editorSettings?.autoSave !== false) {
+      contentChangeTimerRef.current = setTimeout(doSave, editorSettings?.autoSaveDelay || 1000);
+    }
+  }, [onContentChange, doSave, editorSettings?.autoSave, editorSettings?.autoSaveDelay]);
+
+  useEffect(() => () => clearTimeout(contentChangeTimerRef.current), [file?.id]);
 
   const handleMount = useCallback((editor, monaco) => {
     editorRef.current = editor;
@@ -121,24 +124,24 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
       <div className="save-toast" ref={saveToastRef} />
       <div className="editor-toolbar">
         <span className="editor-filename">{file.name}</span>
-        <span className="editor-auto-save-indicator" style={{ fontSize: '11px', color: '#888', fontStyle: 'italic', marginLeft: 'auto', marginRight: '10px' }}>Otomatik Kaydedilir (veya Ctrl+S)</span>
+        <span className="editor-auto-save-indicator" style={{ fontSize: '11px', color: '#888', marginLeft: 'auto', marginRight: '10px' }}>{editorSettings?.autoSave === false ? 'Ctrl+S ile kaydet' : 'Otomatik kaydet açık'}</span>
       </div>
       <div className="editor-wrapper">
         <Editor
-          key={file.name + '::' + (file.content?.length || 0)}
+          key={file.id || file.name}
           height="100%"
           language={getLanguage(file.name)}
-          defaultValue={safeContent(file.content)}
+          value={safeContent(file.content)}
           onMount={handleMount}
           onChange={handleEditorChange}
           theme="vs-dark"
           options={{
-            fontSize: 14,
-            minimap: { enabled: true },
+            fontSize: editorSettings?.fontSize || 14,
+            minimap: { enabled: editorSettings?.minimap !== false },
             scrollBeyondLastLine: false,
             automaticLayout: true,
-            tabSize: 2,
-            wordWrap: 'on',
+            tabSize: editorSettings?.tabSize || 2,
+            wordWrap: editorSettings?.wordWrap === false ? 'off' : 'on',
             renderWhitespace: 'selection',
           }}
         />
