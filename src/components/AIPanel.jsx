@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronRight, Globe, Search
 } from 'lucide-react';
 import './AIPanel.css';
-import { AGENT_TOOLS, toolCallToAction, parseEditPayload } from '../utils/agentTools.js';
+import { AGENT_TOOLS, toolCallToAction, parseEditPayload, READ_TAG_PATTERN } from '../utils/agentTools.js';
 import { replaceUniqueText, supportsWhitespaceMatch } from '../utils/editMatching.js';
 
 // ─── Sabitler ────────────────────────────────────────────────────────────────
@@ -146,7 +146,7 @@ const parseMessageParts = (content) => {
     const mkdirMatch = remaining.match(/\[\s*MKDIR:\s*([^\]]+?)\s*\]/i);
     const cmdMatch = remaining.match(/\[\s*CMD:\s*([^\]]+?)\s*\]/i);
     const editMatch = remaining.match(/\[\s*EDIT:\s*([^\]]+?)\s*\]/i);
-    const readMatch = remaining.match(/\[\s*READ:\s*([^\]]+?)\s*\]/i);
+    const readMatch = remaining.match(READ_TAG_PATTERN);
     const webMatch = remaining.match(/\[\s*WEB:\s*([^\]]+?)\s*\]/i);
 
     if (fileMatch) candidates.push({ type: 'file', index: fileMatch.index, match: fileMatch });
@@ -630,7 +630,7 @@ const TerminalActionBlock = ({ command, actionId, state, onApprove, onReject, on
       <div className="terminal-body">
         <div className="terminal-prompt-line">
           <span className="terminal-prompt-symbol">❯</span>
-          <span className="terminal-prompt-cmd">{command}</span>
+          <span className="terminal-prompt-cmd">{state?.executedCommand || command}</span>
         </div>
         {dangerous && status === 'pending' && <div className="terminal-inline-warning"><AlertTriangle size={11} /> Komutu kontrol edin</div>}
         {status === 'running' && (
@@ -1277,11 +1277,11 @@ KRİTİK KURALLAR:
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ command: normalizeTerminalCommand(action.command), cwd: currentDirPath || undefined }),
           });
-          const { procId } = await startRes.json();
+          const { procId, command: executedCommand } = await startRes.json();
           if (!procId) throw new Error('Process başlatılamadı');
           activeProcIdsRef.current.set(actionId, procId);
 
-          setActionStates(prev => ({ ...prev, [actionId]: { status: 'running', procId } }));
+          setActionStates(prev => ({ ...prev, [actionId]: { status: 'running', procId, executedCommand } }));
 
           const pollStatus = async () => {
             if (activeProcIdsRef.current.get(actionId) !== procId) return;

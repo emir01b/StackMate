@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 test('structured tool calls become agent actions without executing them', async () => {
-  const { AGENT_TOOLS, toolCallToAction } = await import('../src/utils/agentTools.js');
+  const { AGENT_TOOLS, toolCallToAction, READ_TAG_PATTERN } = await import('../src/utils/agentTools.js');
   assert.equal(AGENT_TOOLS.length, 7);
   assert.deepEqual(toolCallToAction({ function: { name: 'read_file', arguments: '{"path":"index.html"}' } }),
     { type: 'read_action', path: 'index.html' });
@@ -12,6 +12,8 @@ test('structured tool calls become agent actions without executing them', async 
     { type: 'file_action', path: 'a.txt', content: 'line\n' });
   assert.equal(toolCallToAction({ function: { name: 'run_command', arguments: '{"command":1}' } }), null);
   assert.equal(toolCallToAction({ function: { name: 'unknown', arguments: '{}' } }), null);
+  assert.equal('[Dosya okuma: index.html]'.match(READ_TAG_PATTERN)?.[1], 'index.html');
+  assert.equal('[READ: index.html]'.match(READ_TAG_PATTERN)?.[1], 'index.html');
 });
 
 test('text edit parser accepts completed inner tags without outer close and rejects cut-off edits', async () => {

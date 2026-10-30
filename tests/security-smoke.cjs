@@ -43,6 +43,18 @@ test('local API rejects foreign origins and project escape', async () => {
     assert.equal((await fetch(url + '/api/fs-watch?path=' + encodeURIComponent(parent), { headers: { Origin: origin } })).status, 400);
     assert.equal((await post('/api/save-file', { path: path.join(root, '..', 'outside.txt'), content: 'changed' })).status, 403);
     assert.equal((await post('/api/agent-run', { command: 'echo escape', cwd: parent })).status, 403);
+    if (process.platform === 'win32') {
+      const listed = await (await post('/api/agent-run', { command: 'ls -la', cwd: root })).json();
+      assert.equal(listed.command, 'dir');
+      let listing;
+      for (let attempt = 0; attempt < 30; attempt++) {
+        listing = await (await post('/api/agent-status', { procId: listed.procId })).json();
+        if (!listing.running) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      assert.equal(listing.exitCode, 0);
+      assert.match(listing.stdout, /inside\.txt/);
+    }
     const started = await (await post('/api/agent-run', { command: 'node -e "setInterval(()=>{},1000)"', cwd: root })).json();
     assert.ok(started.procId);
     let status = await (await post('/api/agent-status', { procId: started.procId })).json();

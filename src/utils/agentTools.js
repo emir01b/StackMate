@@ -1,4 +1,5 @@
 const stringField = { type: 'string' };
+export const READ_TAG_PATTERN = /\[\s*(?:READ|Dosya\s+okuma)\s*:\s*([^\]]+?)\s*\]/i;
 
 const unwrapEditText = (value) => {
   const text = value.replace(/^\r?\n/, '').replace(/\r?\n$/, '');

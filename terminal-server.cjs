@@ -813,6 +813,8 @@ const server = createServer(async (req, res) => {
     }
     command = (typeof command === 'string' ? command : '').trim();
     command = command.replace(/^\s*cmd\s*:\s*/i, '').trim();
+    if (PLATFORM === 'win32' && /^ls(?:\s+-[alh]+)?\s*$/i.test(command)) command = 'dir';
+    if (PLATFORM === 'win32' && /^pwd\s*$/i.test(command)) command = 'cd';
     if (PLATFORM === 'win32' && command.toLowerCase().startsWith('cat ')) {
       const rest = command.slice(4).trim().replace(/^["']|["']$/g, '');
       command = 'type ' + rest;
@@ -847,7 +849,7 @@ const server = createServer(async (req, res) => {
     });
 
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173' });
-    res.end(JSON.stringify({ procId }));
+    res.end(JSON.stringify({ procId, command }));
     return;
   }
 
