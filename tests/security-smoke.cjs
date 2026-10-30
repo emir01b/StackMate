@@ -68,6 +68,18 @@ test('local API rejects foreign origins and project escape', async () => {
     assert.equal(fs.readFileSync(editPath, 'utf8'), 'changed');
     assert.equal((await post('/api/agent-revert', { token: edit.token })).status, 200);
     assert.equal(fs.readFileSync(editPath, 'utf8'), 'inside');
+    const htmlPath = path.join(root, 'index.html');
+    const minifiedHtml = '<main><section id="booking"  class="container">Book</section><footer>End</footer></main>';
+    fs.writeFileSync(htmlPath, minifiedHtml);
+    const formattedEdit = await (await post('/api/agent-stage', {
+      path: htmlPath, type: 'edit',
+      oldText: '<section id="booking"\n class="container">',
+      newText: '<section id="booking" class="container animate-on-scroll">',
+    })).json();
+    assert.ok(formattedEdit.token);
+    assert.match(fs.readFileSync(htmlPath, 'utf8'), /class="container animate-on-scroll"/);
+    assert.equal((await post('/api/agent-revert', { token: formattedEdit.token })).status, 200);
+    assert.equal(fs.readFileSync(htmlPath, 'utf8'), minifiedHtml);
     const protectedEdit = await (await post('/api/agent-stage', { path: editPath, type: 'edit', oldText: 'inside', newText: 'staged' })).json();
     fs.writeFileSync(editPath, 'manual');
     assert.equal((await post('/api/agent-revert', { token: protectedEdit.token })).status, 409);

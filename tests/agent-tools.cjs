@@ -23,3 +23,16 @@ test('text edit parser accepts completed inner tags without outer close and reje
   assert.equal(parseEditPayload('[OLD]<section>old</section>[/OLD][NEW]<section>new', false), null);
   assert.deepEqual(parseEditPayload('[OLD]old[NEW]new', true), { oldText: 'old', newText: 'new', consumedLength: 16 });
 });
+
+test('HTML edit finds one minified match despite model formatting and preserves other content', async () => {
+  const { replaceUniqueText, supportsWhitespaceMatch } = await import('../src/utils/editMatching.js');
+  const before = '<html><body>  <section id="booking"  class="container">Book</section>  <footer>End</footer></body></html>';
+  const oldText = '<section id="booking"\n class="container">';
+  const newText = '<section id="booking" class="container animate-on-scroll">';
+  const after = replaceUniqueText(before, oldText, newText, { allowWhitespace: supportsWhitespaceMatch('index.html') });
+  assert.match(after, /class="container animate-on-scroll"/);
+  assert.match(after, /<footer>End<\/footer>/);
+  assert.equal(replaceUniqueText('<div><span>Old</span></div>', '<div>\n  <span>Old</span>\n</div>', '<div><span>New</span></div>', { allowWhitespace: true }), '<div><span>New</span></div>');
+  assert.throws(() => replaceUniqueText('<p>same</p><p>same</p>', '<p>same</p>', '<p>new</p>', { allowWhitespace: true }), /benzersiz/);
+  assert.throws(() => replaceUniqueText('const label = "a b";', 'const label = "a   b";', 'changed', { allowWhitespace: supportsWhitespaceMatch('script.js') }), /benzersiz/);
+});

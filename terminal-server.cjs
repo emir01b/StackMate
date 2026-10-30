@@ -243,16 +243,8 @@ const server = createServer(async (req, res) => {
         if (typeof content !== 'string') throw new Error('Dosya içeriği geçersiz');
         after = content;
       } else {
-        if (typeof oldText !== 'string' || !oldText || typeof newText !== 'string') throw new Error('Düzenleme metni geçersiz');
-        if (before.split(oldText).length === 2) {
-          after = before.replace(oldText, newText);
-        } else if (before.replace(/\r\n/g, '\n').trim() === oldText.replace(/\r\n/g, '\n').trim()) {
-          const newline = before.includes('\r\n') ? '\r\n' : '\n';
-          after = newText.replace(/\r\n/g, '\n').replace(/\n/g, newline);
-          if (before.endsWith(newline) && !after.endsWith(newline)) after += newline;
-        } else {
-          throw new Error('Eski metin dosyada tam olarak bir kez bulunmalı');
-        }
+        const { replaceUniqueText, supportsWhitespaceMatch } = await import('./src/utils/editMatching.js');
+        after = replaceUniqueText(before, oldText, newText, { allowWhitespace: supportsWhitespaceMatch(filePath) });
       }
       const token = randomUUID();
       const record = { filePath, before, after, existed, root: projectRoot, type, oldText, newText };

@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import './AIPanel.css';
 import { AGENT_TOOLS, toolCallToAction, parseEditPayload } from '../utils/agentTools.js';
+import { replaceUniqueText, supportsWhitespaceMatch } from '../utils/editMatching.js';
 
 // ─── Sabitler ────────────────────────────────────────────────────────────────
 const LM_STUDIO_URL = 'http://localhost:3001/api/ai-chat';
@@ -76,18 +77,6 @@ const resolveActionPath = (baseDirPath, actionPath) => {
 
 const normalizeTerminalCommand = (cmd) =>
   typeof cmd === 'string' ? cmd.replace(/^\s*cmd\s*:\s*/i, '').trim() : cmd;
-
-const applyEditText = (before, oldText, newText) => {
-  if (!oldText || typeof newText !== 'string') throw new Error('Düzenleme metni geçersiz');
-  if (before.split(oldText).length === 2) return before.replace(oldText, newText);
-  if (before.replace(/\r\n/g, '\n').trim() !== oldText.replace(/\r\n/g, '\n').trim()) {
-    throw new Error('Eski metin dosyada tam olarak bir kez bulunmalı');
-  }
-  const newline = before.includes('\r\n') ? '\r\n' : '\n';
-  let after = newText.replace(/\r\n/g, '\n').replace(/\n/g, newline);
-  if (before.endsWith(newline) && !after.endsWith(newline)) after += newline;
-  return after;
-};
 
 const ensureBackendRoot = async (dirPath) => {
   const response = await fetch('http://localhost:3001/api/project-root', {
@@ -268,6 +257,16 @@ const parseMessageParts = (content) => {
 const getMessageParts = (message) => message.actions?.length
   ? [...(message.content ? [{ type: 'text', content: message.content }] : []), ...message.actions]
   : parseMessageParts(message.content || '');
+
+const summarizeAssistantMessage = (message) => getMessageParts(message).map(part => {
+  if (part.type === 'text') return part.content.slice(0, 1200);
+  if (part.type === 'edit_action') return `[Düzenleme istendi: ${part.path}]`;
+  if (part.type === 'file_action') return `[Dosya yazımı istendi: ${part.path}]`;
+  if (part.type === 'read_action') return `[Dosya okundu: ${part.path}]`;
+  if (part.type === 'incomplete_action') return `[Eksik işlem yanıtı: ${part.path || part.kind}]`;
+  if (part.type === 'terminal_action') return `[Terminal komutu: ${part.command}]`;
+  return `[${part.type}: ${part.path || part.query || ''}]`;
+}).filter(Boolean).join('\n').slice(0, 2500);
 
 // ─── Alt Bileşenler ──────────────────────────────────────────────────────────
 const renderInlineText = (text) => {
@@ -736,6 +735,7 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
   const autoStepCountRef = useRef(0);
   const invalidResponseRetriesRef = useRef(new Map());
   const invalidActionIdsRef = useRef(new Map());
+  const editFailureRetriesRef = useRef(new Map());
   const autoStoppedRef = useRef(false);
   const stagedFsaaRef = useRef(new Map());
   const actionStatesRef = useRef(actionStates);
@@ -859,6 +859,7 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
       autoStoppedRef.current = false;
       invalidResponseRetriesRef.current.clear();
       invalidActionIdsRef.current.clear();
+      editFailureRetriesRef.current.clear();
     }
 
     // Kilidi HEMEN al — race condition'ı önle
@@ -886,8 +887,15 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
 
     try {
       // Mesajları filtrele
-      const filtered = updatedMessages.filter(m => {
+      const latestReadByPath = new Map();
+      updatedMessages.forEach((message, index) => {
+        const match = message.role === 'user' && message.content?.match(/^\[SİSTEM - Güncel dosya içeriği: ([^\]]+)\]/);
+        if (match) latestReadByPath.set(match[1], index);
+      });
+      const filtered = updatedMessages.filter((m, index) => {
         if (m.hiddenFromUI || (!m?.content && !m?.actions?.length)) return false;
+        const readMatch = m.role === 'user' && m.content?.match(/^\[SİSTEM - Güncel dosya içeriği: ([^\]]+)\]/);
+        if (readMatch && latestReadByPath.get(readMatch[1]) !== index) return false;
         if (typeof m.content === 'string') {
           return !m.content.startsWith('(Yanıt alınamadı)') && !m.content.startsWith('⚠️') && !m.content.startsWith('❌');
         }
@@ -897,8 +905,7 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
       const apiMessages = [];
       for (let i = 0; i < filtered.length; i++) {
         const m = filtered[i];
-        const actionSummary = (m.actions || []).map(action => `[İstenen işlem: ${action.type} ${action.path || action.command || action.query || ''}]`).join('\n');
-        const content = [m.content, actionSummary].filter(Boolean).join('\n');
+        const content = m.role === 'assistant' ? summarizeAssistantMessage(m) : m.content;
         if (i === 0 && m.role === 'assistant') {
           apiMessages.push({ role: 'system', content });
         } else {
@@ -1060,6 +1067,7 @@ KRİTİK KURALLAR:
           } catch (_) { /* JSON parse hatası — atla */ }
         }
       }
+      if (stopAfterFirstCmd) await stream.cancel();
 
       const structuredActions = [...toolFragments.entries()].sort((a, b) => a[0] - b[0])
         .map(([, call]) => toolCallToAction(call)).filter(Boolean).slice(0, 1);
@@ -1238,7 +1246,7 @@ KRİTİK KURALLAR:
           } else {
             const { dir, fileName } = await fsaResolvePath(currentDirHandle, action.path);
             const before = await (await (await dir.getFileHandle(fileName)).getFile()).text();
-            const after = applyEditText(before, action.oldText, action.newText);
+            const after = replaceUniqueText(before, action.oldText, action.newText, { allowWhitespace: supportsWhitespaceMatch(action.path) });
             await fsaaWriteFile(currentDirHandle, action.path, after);
             stagedFsaaRef.current.set(actionId, { dirHandle: currentDirHandle, path: action.path, before, after });
           }
@@ -1340,7 +1348,12 @@ KRİTİK KURALLAR:
       // Terminal hataları için otomatik AI geri bildirimi yapma — kullanıcı Devam Et/Hatayı Bildir butonuyla kontrol eder
       // Sadece dosya/düzenleme hatalarını AI'a ilet
       if (action.type === 'edit_action' && previousState?.status !== 'review') {
-        handleSendRef.current(`[SİSTEM: "${action.path}" düzenlenemedi: ${err.message}. Aynı OLD metniyle tekrar deneme. Önce read_file aracıyla güncel dosyayı oku; sonra mevcut içerikten kısa ve birebir bir parça seç.]`);
+        const retries = editFailureRetriesRef.current.get(action.path) || 0;
+        if (retries < 1 && !autoStoppedRef.current && autoStepCountRef.current < agentSettingsRef.current.maxAutoSteps) {
+          editFailureRetriesRef.current.set(action.path, retries + 1);
+          autoStepCountRef.current += 1;
+          handleSendRef.current(`[SİSTEM: "${action.path}" düzenlenemedi: ${err.message}. Aynı OLD metnini yineleme. Dosyanın güncel içeriğini read_file ile oku, yalnızca gerçekten bulunan kısa ve benzersiz bir parça seç. Dosyanın tamamını OLD içine koyma. Tekrar başarısız olursa işlemi durdur ve hatayı açıkla.]`);
+        }
       }
       return { success: false };
     } finally {
