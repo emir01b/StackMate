@@ -1251,6 +1251,7 @@
 .terminal-inline-warning { display: flex; align-items: center; gap: 4px; margin-top: 5px; color: #c7a96e; font-size: 10px; }
 .terminal-continue-bar { border-top-color: #34383f; }
 .incomplete-action { display: flex; align-items: center; gap: 7px; padding: 9px; color: #c9aa77; font-size: 11px; }
+.incomplete-action.resolved { color: #9fb4a4; border-color: #35453a; }
 
 /* Quiet, compact conversation layout */
 .ai-panel-container { background: #191b1e; color: #d6d9de; }

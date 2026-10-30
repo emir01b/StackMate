@@ -1,5 +1,29 @@
 const stringField = { type: 'string' };
 
+const unwrapEditText = (value) => {
+  const text = value.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+  const fence = text.match(/^```[a-zA-Z0-9]*\r?\n([\s\S]*?)\r?\n```$/);
+  return fence ? fence[1] : text;
+};
+
+export const parseEditPayload = (body, hasOuterClose) => {
+  const oldMatch = body.match(/\[\s*OLD\s*\]([\s\S]*?)\[\s*\/\s*OLD\s*\]/i);
+  const newMatch = body.match(/\[\s*NEW\s*\]([\s\S]*?)\[\s*\/\s*NEW\s*\]/i);
+  if (oldMatch && newMatch && oldMatch.index + oldMatch[0].length <= newMatch.index) {
+    const oldText = unwrapEditText(oldMatch[1]);
+    return oldText ? { oldText, newText: unwrapEditText(newMatch[1]), consumedLength: newMatch.index + newMatch[0].length } : null;
+  }
+  if (!hasOuterClose) return null;
+  const loose = body.match(/\[\s*OLD\s*\]([\s\S]*?)\[\s*NEW\s*\]([\s\S]*)/i);
+  if (!loose) return null;
+  const oldText = unwrapEditText(loose[1].replace(/\[\s*\/\s*OLD\s*\]\s*$/i, ''));
+  return oldText ? {
+    oldText,
+    newText: unwrapEditText(loose[2].replace(/\[\s*\/\s*NEW\s*\]\s*$/i, '')),
+    consumedLength: body.length,
+  } : null;
+};
+
 const defineTool = (name, description, properties) => ({
   type: 'function',
   function: {

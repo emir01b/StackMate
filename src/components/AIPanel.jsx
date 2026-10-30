@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronRight, Globe, Search
 } from 'lucide-react';
 import './AIPanel.css';
-import { AGENT_TOOLS, toolCallToAction } from '../utils/agentTools.js';
+import { AGENT_TOOLS, toolCallToAction, parseEditPayload } from '../utils/agentTools.js';
 
 // ─── Sabitler ────────────────────────────────────────────────────────────────
 const LM_STUDIO_URL = 'http://localhost:3001/api/ai-chat';
@@ -76,12 +76,6 @@ const resolveActionPath = (baseDirPath, actionPath) => {
 
 const normalizeTerminalCommand = (cmd) =>
   typeof cmd === 'string' ? cmd.replace(/^\s*cmd\s*:\s*/i, '').trim() : cmd;
-
-const unwrapEditText = (value) => {
-  const boundaryNewlineRemoved = value.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
-  const fence = boundaryNewlineRemoved.match(/^```[a-zA-Z0-9]*\r?\n([\s\S]*?)\r?\n```$/);
-  return fence ? fence[1] : boundaryNewlineRemoved;
-};
 
 const applyEditText = (before, oldText, newText) => {
   if (!oldText || typeof newText !== 'string') throw new Error('Düzenleme metni geçersiz');
@@ -253,43 +247,16 @@ const parseMessageParts = (content) => {
         const editPath = earliest.match[1].trim();
         const afterEditTag = remaining.slice(earliest.index + earliest.match[0].length);
         const editCloseMatch = afterEditTag.match(/\[\s*\/\s*EDIT\s*\]/i);
-        if (editCloseMatch) {
-          let editBody = afterEditTag.slice(0, editCloseMatch.index).trim();
-          const mdM = editBody.match(/^```[a-zA-Z]*\n?([\s\S]*?)\n?```$/);
-          if (mdM) editBody = mdM[1].trim();
-
-          let oldTextVal = '', newTextVal = '';
-          const oldMatch = editBody.match(/\[\s*OLD\s*\]([\s\S]*?)\[\s*\/\s*OLD\s*\]/i);
-          const newMatch = editBody.match(/\[\s*NEW\s*\]([\s\S]*?)\[\s*\/\s*NEW\s*\]/i);
-
-          if (oldMatch && newMatch) {
-            oldTextVal = unwrapEditText(oldMatch[1]);
-            newTextVal = unwrapEditText(newMatch[1]);
-          } else {
-            const idxOld = editBody.search(/\[\s*OLD\s*\]/i);
-            const idxNew = editBody.search(/\[\s*NEW\s*\]/i);
-            if (idxOld !== -1 && idxNew > idxOld) {
-              const oldTag = editBody.slice(idxOld).match(/\[\s*OLD\s*\]/i);
-              const newTag = editBody.slice(idxNew).match(/\[\s*NEW\s*\]/i);
-              if (oldTag && newTag) {
-                const afterOld = editBody.slice(idxOld + oldTag[0].length);
-                const newIdxInAfter = afterOld.search(/\[\s*NEW\s*\]/i);
-                oldTextVal = unwrapEditText((newIdxInAfter === -1 ? afterOld : afterOld.slice(0, newIdxInAfter)).replace(/\[\s*\/\s*OLD\s*\]\s*$/i, ''));
-                newTextVal = unwrapEditText(editBody.slice(idxNew + newTag[0].length).replace(/\[\s*\/\s*NEW\s*\]\s*$/i, ''));
-              }
-            }
-          }
-
-          if (oldTextVal !== '') {
-            segments.push({ type: 'edit_action', path: editPath, oldText: oldTextVal, newText: newTextVal });
-          } else {
-            segments.push({ type: 'incomplete_action', kind: 'edit', path: editPath });
-          }
-          remaining = afterEditTag.slice(editCloseMatch.index + editCloseMatch[0].length);
+        const editBody = afterEditTag.slice(0, editCloseMatch?.index ?? afterEditTag.length);
+        const edit = parseEditPayload(editBody, !!editCloseMatch);
+        if (edit) {
+          segments.push({ type: 'edit_action', path: editPath, oldText: edit.oldText, newText: edit.newText });
         } else {
           segments.push({ type: 'incomplete_action', kind: 'edit', path: editPath });
-          remaining = '';
         }
+        remaining = editCloseMatch
+          ? afterEditTag.slice(editCloseMatch.index + editCloseMatch[0].length)
+          : edit ? afterEditTag.slice(edit.consumedLength) : '';
         break;
       }
       default:
@@ -444,7 +411,7 @@ const FileActionBlock = ({ path: filePath, content, incomplete, actionId, state,
             </button>
           </div>
         )}
-        {incomplete && <span className="action-status error">Yanıt eksik</span>}
+        {incomplete && <span className={`action-status ${status === 'resolved' ? 'done' : 'error'}`}>{status === 'resolved' ? 'Sonraki işlemle tamamlandı' : state?.error || 'Yanıt eksik'}</span>}
         {status === 'running' && <span className="action-status running"><Loader2 size={12} className="spin" /> Uygulanıyor...</span>}
         {status === 'done' && <span className="action-status done"><Check size={12} /> Onaylandı</span>}
         {status === 'rejected' && <span className="action-status rejected">Geri alındı</span>}
@@ -730,7 +697,7 @@ const MessageContent = ({ message, messageIndex, actionStates, onApprove, onReje
           case 'edit_action':
             return <EditActionBlock key={i} path={part.path} oldText={part.oldText} newText={part.newText} actionId={actionId} state={state} onApprove={onApprove} onReject={onReject} />;
           case 'incomplete_action':
-            return <div key={i} className="action-block incomplete-action"><AlertTriangle size={13} /> {part.path}: Düzenleme yanıtı eksik veya biçimi hatalı. Dosya değiştirilmedi.</div>;
+            return <div key={i} className={`action-block incomplete-action${state?.status === 'resolved' ? ' resolved' : ''}`}><AlertTriangle size={13} /> {part.path || 'İşlem'}: {state?.status === 'resolved' ? 'İlk yanıt eksikti; sonraki düzenleme uygulandı.' : state?.error || 'Model yanıtı tamamlanmadı. Dosya değiştirilmedi; kısa bir işlemle yeniden deneniyor.'}</div>;
           default:
             return <span key={i} className="message-text">{renderInlineText(part.content)}</span>;
         }
@@ -767,6 +734,8 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
   const commandRetryCountRef = useRef({}); // komut bazlı başarısız deneme sayacı (max 3)
   const autoAppliedRef = useRef(new Set());
   const autoStepCountRef = useRef(0);
+  const invalidResponseRetriesRef = useRef(new Map());
+  const invalidActionIdsRef = useRef(new Map());
   const autoStoppedRef = useRef(false);
   const stagedFsaaRef = useRef(new Map());
   const actionStatesRef = useRef(actionStates);
@@ -888,6 +857,8 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange }) => {
     if (!isOverride) {
       autoStepCountRef.current = 0;
       autoStoppedRef.current = false;
+      invalidResponseRetriesRef.current.clear();
+      invalidActionIdsRef.current.clear();
     }
 
     // Kilidi HEMEN al — race condition'ı önle
@@ -987,7 +958,7 @@ KRİTİK KURALLAR:
 2. echo ile dosya oluşturma YAPMA. Bunun yerine [FILE: yol][/FILE] kullan.
 3. copy/cp ile dosya kopyalama yerine [FILE:] ile yeni dosyayı doğrudan oluştur.
 4. ASLA düz metin olarak "CMD: komut" yazma, MUTLAKA [CMD: komut] formatını kullan.
-5. Küçük değişiklikte [EDIT] kullan; [OLD] alanına yalnızca dosyadan birebir eşleşen kısa parçayı koy. Tüm dosyayı yenileyeceksen [FILE] veya write_file aracını kullan. Etiketleri mutlaka kapat; yanıt yarıda kalırsa işlem uygulanamaz.
+5. Küçük değişiklikte edit_file aracını veya [EDIT] biçimini kullan. OLD yalnızca dosyadan birebir alınmış en fazla birkaç satırlık benzersiz parça olmalı; tüm dosyayı OLD içine kopyalama. Tüm dosyayı yenileyeceksen [FILE] veya write_file kullan. Etiketleri mutlaka kapat; yarım yanıt uygulanamaz.
 6. [CMD: ...] veya [WEB: ...] etiketi yazdıktan SONRA cümleni bitir ve metin üretmeyi DURDUR. Arkasından başka komut yazma, benim cevabımı bekle.
 7. Markdown kod bloğu (\`\`\`bash ... \`\`\`) kullanma; bunun yerine [CMD: ...] kullan.
 8. [SİSTEM - Terminal çıktısı] veya [SİSTEM - Web Araması Sonuçları] mesajı aldığında DUR.
@@ -1023,6 +994,7 @@ KRİTİK KURALLAR:
       const stream = response.body.getReader();
       let assistantContent = '';
       const toolFragments = new Map();
+      let finishReason = null;
       let pendingSse = '';
       let isFirstChunk = true;
       let stopAfterFirstCmd = false;
@@ -1050,6 +1022,7 @@ KRİTİK KURALLAR:
           if (data === '[DONE]') continue;
           try {
             const parsed = JSON.parse(data);
+            if (parsed.choices?.[0]?.finish_reason) finishReason = parsed.choices[0].finish_reason;
             const choiceDelta = parsed.choices?.[0]?.delta || {};
             for (const piece of choiceDelta.tool_calls || []) {
               const index = piece.index ?? 0;
@@ -1098,10 +1071,26 @@ KRİTİK KURALLAR:
         });
       }
 
-      if (!assistantContent.trim() && !structuredActions.length) {
+      if (toolFragments.size > 0 && structuredActions.length === 0) {
+        setMessages(prev => {
+          const next = [...prev];
+          next[next.length - 1] = { role: 'assistant', content: assistantContent, actions: [{ type: 'incomplete_action', kind: 'tool', path: 'Araç çağrısı' }] };
+          return next;
+        });
+      }
+
+      if (!assistantContent.trim() && !structuredActions.length && toolFragments.size === 0) {
         setMessages(prev => {
           const next = [...prev];
           next[next.length - 1] = { role: 'assistant', content: '(Yanıt alınamadı)' };
+          return next;
+        });
+      }
+
+      if (finishReason === 'length') {
+        setMessages(prev => {
+          const next = [...prev];
+          next[next.length - 1] = { ...next[next.length - 1], finishReason };
           return next;
         });
       }
@@ -1403,11 +1392,11 @@ KRİTİK KURALLAR:
     messages.forEach((message, messageIndex) => {
       if (message.role !== 'assistant' || message.hiddenFromUI) return;
       getMessageParts(message).forEach((part, partIndex) => {
-        if (!['file_action', 'edit_action', 'read_action'].includes(part.type) || part.incomplete) return;
+        if (!['file_action', 'edit_action', 'read_action', 'incomplete_action'].includes(part.type)) return;
         const actionId = `msg-${messageIndex}-part-${partIndex}`;
         if (autoAppliedRef.current.has(actionId)) return;
         autoAppliedRef.current.add(actionId);
-        pending.push({ actionId, part, messageIndex });
+        pending.push({ actionId, part, messageIndex, incomplete: !!part.incomplete || part.type === 'incomplete_action' });
       });
     });
     if (!pending.length) return;
@@ -1415,8 +1404,41 @@ KRİTİK KURALLAR:
       let feedback = '';
       let shouldContinue = false;
       for (const item of pending) {
+        if (item.incomplete) {
+          if (item.messageIndex !== lastAssistantIndex || autoStoppedRef.current || requestInFlightRef.current) return;
+          const key = `${item.part.kind || item.part.type}:${item.part.path || ''}`;
+          const invalidIds = invalidActionIdsRef.current.get(key) || [];
+          invalidIds.push(item.actionId);
+          invalidActionIdsRef.current.set(key, invalidIds);
+          const retries = (invalidResponseRetriesRef.current.get(key) || 0) + 1;
+          invalidResponseRetriesRef.current.set(key, retries);
+          if (retries > 2 || autoStepCountRef.current >= agentSettingsRef.current.maxAutoSteps) {
+            setActionStates(prev => {
+              const next = { ...prev };
+              invalidIds.forEach(id => { next[id] = { status: 'error', error: 'Düzenleme yanıtı tekrar tamamlanamadı. Dosya değiştirilmedi.' }; });
+              return next;
+            });
+            return;
+          }
+          autoStepCountRef.current += 1;
+          handleSendRef.current(`[SİSTEM - ${item.part.path || 'Dosya'} işlemi uygulanmadı: yanıt biçimi eksik veya model çıktısı kesildi. Aynı uzun yanıtı yineleme. Tüm dosyayı OLD içine koyma. Önceki dosya içeriğinden en fazla birkaç satırlık benzersiz OLD parçası seç ve kısa NEW yaz. Mümkünse edit_file aracını kullan; metin biçiminde ise [EDIT: yol][OLD]kısa eski[/OLD][NEW]kısa yeni[/NEW][/EDIT] etiketlerini tamamen kapat. Dosyanın tamamını değiştireceksen write_file kullan. Kullanıcıdan içerik istemeden asıl göreve devam et.]`);
+          return;
+        }
         const result = await handleActionApprove(item.actionId, item.part);
         if (!result?.success) return;
+        if (item.part.type === 'edit_action' || item.part.type === 'file_action') {
+          const key = `${item.part.type === 'edit_action' ? 'edit' : 'file_action'}:${item.part.path}`;
+          const resolved = [...(invalidActionIdsRef.current.get(key) || []), ...(invalidActionIdsRef.current.get('tool:Araç çağrısı') || [])];
+          if (resolved.length) {
+            setActionStates(prev => {
+              const next = { ...prev };
+              resolved.forEach(id => { next[id] = { status: 'resolved' }; });
+              return next;
+            });
+            invalidActionIdsRef.current.delete(key);
+            invalidActionIdsRef.current.delete('tool:Araç çağrısı');
+          }
+        }
         if (item.messageIndex === lastAssistantIndex) {
           shouldContinue = true;
           feedback = result.feedback || feedback;
