@@ -1,6 +1,6 @@
 const { WebSocketServer } = require('ws');
 const { createServer } = require('http');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
@@ -10,19 +10,31 @@ const { readSettings, publicSettings, updateSettings, activeConnection, endpoint
 const PORT = Number(process.env.STACKMATE_PORT || 3001);
 const ALLOWED_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
 let projectRoot = null;
+let folderPickerOpen = false;
 let appSettings = readSettings();
+const isInside = (root, target) => {
+  const relative = path.relative(root, target);
+  return relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
+};
+// Var olan en yakın üst dizinin gerçek yolunu alır; böylece /tmp → /private/tmp gibi
+// sembolik bağlantılı yollar da proje kökünün (realpath) içinde sayılır.
+const realTargetPath = (target) => {
+  let existing = path.resolve(target);
+  const missing = [];
+  for (;;) {
+    try { fs.lstatSync(existing); break; } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) break;
+      missing.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+  // Kırık sembolik bağlantıda realpath hata verir ve işlem reddedilir.
+  return path.join(fs.realpathSync(existing), ...missing);
+};
 const withinRoot = (target, root) => {
-  if (!root || typeof target !== 'string') return false;
-  try {
-    const resolved = path.resolve(target);
-    const relative = path.relative(root, resolved);
-    if (!(relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)))) return false;
-    let existing = resolved;
-    while (!fs.existsSync(existing)) existing = path.dirname(existing);
-    const real = fs.realpathSync(existing);
-    const realRelative = path.relative(root, real);
-    return realRelative === '' || (realRelative !== '..' && !realRelative.startsWith('..' + path.sep) && !path.isAbsolute(realRelative));
-  } catch { return false; }
+  if (!root || typeof target !== 'string' || !target) return false;
+  try { return isInside(root, realTargetPath(target)); } catch { return false; }
 };
 const withinProject = (target) => withinRoot(target, projectRoot);
 const PLATFORM = os.platform(); // 'darwin' | 'linux' | 'win32'
@@ -49,8 +61,11 @@ const stageRecordPath = (token) => path.join(stageStoreDir, `${token}.json`);
 for (const filename of fs.readdirSync(stageStoreDir)) {
   if (!/^[0-9a-f-]{36}\.json$/i.test(filename)) continue;
   try {
-    const record = JSON.parse(fs.readFileSync(path.join(stageStoreDir, filename), 'utf8'));
+    const recordPath = path.join(stageStoreDir, filename);
+    const record = JSON.parse(fs.readFileSync(recordPath, 'utf8'));
     if (typeof record.filePath === 'string' && typeof record.root === 'string' && typeof record.after === 'string') {
+      // Eski kayıtlarda zaman yoksa dosya zamanını kullan; geri alma sırası kronolojik olmalı.
+      record.createdAt ??= fs.statSync(recordPath).mtimeMs;
       stagedChanges.set(filename.slice(0, -5), record);
     }
   } catch { /* geçersiz kayıtları yok say */ }
@@ -64,6 +79,125 @@ const killAgentProcess = (proc) => {
     proc.kill('SIGTERM');
   }
 };
+
+// ─── Platform yardımcıları: klasör seçici, çöp kutusu, dosya yöneticisinde gösterme ──
+const runFile = (command, args, options = {}) => new Promise((resolve, reject) => {
+  execFile(command, args, { windowsHide: true, maxBuffer: 1024 * 1024, ...options }, (error, stdout, stderr) => {
+    if (error) reject(Object.assign(error, { stderr: String(stderr || '') }));
+    else resolve(String(stdout || ''));
+  });
+});
+
+// PowerShell'e betiği tırnak sorunu olmadan iletmek için UTF-16LE base64 kullanılır.
+const runPowerShell = (script, env = {}) => runFile('powershell.exe', [
+  '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
+  '-EncodedCommand', Buffer.from(`[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n${script}`, 'utf16le').toString('base64'),
+], { env: { ...process.env, ...env }, timeout: 10 * 60 * 1000 });
+
+const appleScriptString = (value) => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+// İşletim sisteminin kendi klasör seçicisini açar; iptalde null döner.
+const pickFolder = async (startPath) => {
+  const start = startPath && fs.existsSync(startPath) ? startPath : HOME;
+  if (PLATFORM === 'darwin') {
+    try {
+      const output = await runFile('osascript', [
+        '-e', 'activate',
+        '-e', `POSIX path of (choose folder with prompt "Proje klasörünü seçin" default location (POSIX file ${appleScriptString(start)}))`,
+      ], { timeout: 10 * 60 * 1000 });
+      const picked = output.trim();
+      return picked.length > 1 ? picked.replace(/\/+$/, '') : picked;
+    } catch (error) {
+      if (/-128/.test(error.stderr)) return null; // Kullanıcı iptal etti.
+      throw error;
+    }
+  }
+  if (PLATFORM === 'win32') {
+    const output = await runPowerShell(`
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Proje klasörünü seçin'
+$dialog.ShowNewFolderButton = $true
+$dialog.SelectedPath = $env:STACKMATE_START
+$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
+if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }
+$owner.Dispose()`, { STACKMATE_START: start });
+    return output.trim() || null;
+  }
+  for (const [command, args] of [
+    ['zenity', ['--file-selection', '--directory', '--title=Proje klasörünü seçin', `--filename=${start}/`]],
+    ['kdialog', ['--getexistingdirectory', start, '--title', 'Proje klasörünü seçin']],
+  ]) {
+    try {
+      return (await runFile(command, args, { timeout: 10 * 60 * 1000 })).trim() || null;
+    } catch (error) {
+      if (error.code === 'ENOENT') continue; // Bu araç kurulu değil.
+      if (error.code === 1) return null; // İptal.
+      throw error;
+    }
+  }
+  throw Object.assign(new Error('Bu sistemde klasör seçici bulunamadı (zenity veya kdialog kurun)'), { code: 'UNSUPPORTED' });
+};
+
+// Silinen öğeyi kalıcı silmek yerine çöp kutusuna / geri dönüşüm kutusuna taşır.
+const moveToTrash = async (target) => {
+  if (PLATFORM === 'darwin') {
+    const trash = path.join(HOME, '.Trash');
+    const base = path.basename(target);
+    let destination = path.join(trash, base);
+    // Çöp kutusu listelenemese de tek bir yol lstat ile denetlenebilir; çakışmada üzerine yazma.
+    const taken = (candidate) => { try { fs.lstatSync(candidate); return true; } catch { return false; } };
+    if (taken(destination)) {
+      const ext = path.extname(base);
+      destination = path.join(trash, `${path.basename(base, ext)} ${new Date().toISOString().replace(/[:.]/g, '-')}${ext}`);
+    }
+    try { fs.renameSync(target, destination); return; } catch (error) {
+      if (!['EXDEV', 'EPERM', 'EACCES'].includes(error.code)) throw error;
+    }
+    // Farklı disk veya izin sorunu: Finder'ın kendisine taşıt.
+    await runFile('osascript', ['-e', `tell application "Finder" to delete (POSIX file ${appleScriptString(target)} as alias)`], { timeout: 60 * 1000 });
+    return;
+  }
+  if (PLATFORM === 'win32') {
+    await runPowerShell(`
+Add-Type -AssemblyName Microsoft.VisualBasic
+$target = $env:STACKMATE_TARGET
+if (Test-Path -LiteralPath $target -PathType Container) {
+  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($target, 'OnlyErrorDialogs', 'SendToRecycleBin')
+} else {
+  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($target, 'OnlyErrorDialogs', 'SendToRecycleBin')
+}`, { STACKMATE_TARGET: target });
+    if (fs.existsSync(target)) throw new Error('Geri dönüşüm kutusuna taşınamadı');
+    return;
+  }
+  await runFile('gio', ['trash', target], { timeout: 60 * 1000 });
+};
+
+const revealInFileManager = (target) => {
+  if (PLATFORM === 'darwin') return runFile('open', ['-R', target]);
+  // explorer.exe başarılı olsa bile 1 ile çıkabilir; sonucu beklemeden döner.
+  if (PLATFORM === 'win32') { spawn('explorer.exe', [`/select,${target}`], { detached: true, stdio: 'ignore' }).unref(); return Promise.resolve(); }
+  return runFile('xdg-open', [fs.statSync(target).isDirectory() ? target : path.dirname(target)]);
+};
+
+// Dosya sistemi hatalarını kullanıcıya anlaşılır biçimde aktar.
+const fsErrorMessage = (error) => ({
+  EEXIST: 'Bu adla bir dosya veya klasör zaten var',
+  ENOENT: 'Dosya veya klasör bulunamadı',
+  EACCES: 'Bu işlem için izin yok',
+  EPERM: 'İzin yok veya dosya başka bir program tarafından kullanılıyor',
+  EBUSY: 'Dosya başka bir program tarafından kullanılıyor',
+  ENOTEMPTY: 'Klasör boş değil',
+  ENOTDIR: 'Yol bir klasör değil',
+  EISDIR: 'Yol bir klasör',
+  EINVAL: 'Geçersiz ad veya yol',
+  ENAMETOOLONG: 'Ad veya yol çok uzun',
+}[error.code] || error.message);
+
+// Explorer'da gösterilmeyen sistem dosyaları.
+const HIDDEN_ENTRIES = new Set(['.git', '.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes', '$RECYCLE.BIN', 'System Volume Information']);
+const naturalCompare = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 
 // Komutu platforma göre çalıştır
 const spawnCommand = (cmd, cwd) => {
@@ -107,36 +241,35 @@ const parseBody = (req) => req.parsedBody ? Promise.resolve(req.parsedBody) : ne
   req.on('error', reject);
 });
 
-// Rekürsif dizin okuma (sadece ilk seviye)
+// Tek seviye dizin okuma (explorer klasörleri tıklandıkça yükler).
+// Sembolik bağlantılar hedefinin türüyle gösterilir; kırık bağlantı dosya sayılır.
 const readDirTree = (dirPath) => {
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
   const result = [];
-  for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue; // Gizli dosyaları atla
-    result.push({
-      name: entry.name,
-      type: entry.isDirectory() ? 'folder' : 'file',
-      children: entry.isDirectory() ? [] : undefined,
-    });
+  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    if (HIDDEN_ENTRIES.has(entry.name)) continue;
+    let isDirectory = entry.isDirectory();
+    if (entry.isSymbolicLink()) {
+      try { isDirectory = fs.statSync(path.join(dirPath, entry.name)).isDirectory(); } catch { isDirectory = false; }
+    }
+    result.push({ name: entry.name, type: isDirectory ? 'folder' : 'file', ...(entry.isSymbolicLink() ? { symlink: true } : {}) });
   }
-  result.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-  return result;
+  return result.sort((a, b) => (a.type === b.type ? naturalCompare(a.name, b.name) : a.type === 'folder' ? -1 : 1));
 };
+
+// Büyük bağımlılık/çıktı klasörleri derin okumada açılmaz; explorer bunları tıklanınca yükler.
+const HEAVY_DIRS = new Set(['node_modules', 'dist', 'build', 'out', 'coverage', 'vendor', '__pycache__', 'venv', 'target']);
 
 // Rekürsif dizin okuma (tüm derinlik)
 const readDirTreeDeep = (dirPath) => {
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
   const result = [];
   for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue;
+    if (HIDDEN_ENTRIES.has(entry.name)) continue;
     if (entry.isDirectory()) {
       result.push({
         name: entry.name,
         type: 'folder',
-        children: readDirTreeDeep(path.join(dirPath, entry.name)),
+        children: HEAVY_DIRS.has(entry.name) ? [] : readDirTreeDeep(path.join(dirPath, entry.name)),
       });
     } else {
       result.push({ name: entry.name, type: 'file' });
@@ -147,6 +280,32 @@ const readDirTreeDeep = (dirPath) => {
     return a.name.localeCompare(b.name);
   });
   return result;
+};
+
+// Agent için girintili, sınırlı dizin listesi (klasörler "/" ile biter).
+const listDirForAgent = (dirPath, { maxDepth = 3, maxEntries = 400 } = {}) => {
+  const lines = [];
+  let truncated = false;
+  const walk = (current, depth) => {
+    let entries;
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { return; }
+    entries = entries.filter(entry => !entry.name.startsWith('.') || entry.name === '.env.example')
+      .sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1));
+    for (const entry of entries) {
+      if (lines.length >= maxEntries) { truncated = true; return; }
+      const indent = '  '.repeat(depth);
+      if (entry.isDirectory()) {
+        const skipped = HEAVY_DIRS.has(entry.name);
+        lines.push(`${indent}${entry.name}/${skipped ? ' (içerik listelenmedi)' : ''}`);
+        if (!skipped && depth + 1 < maxDepth) walk(path.join(current, entry.name), depth + 1);
+      } else {
+        lines.push(`${indent}${entry.name}`);
+      }
+    }
+  };
+  walk(dirPath, 0);
+  if (truncated) lines.push(`... (liste ${maxEntries} öğeyle sınırlandı; alt klasörü ayrıca listeleyin)`);
+  return lines.join('\n');
 };
 
 const server = createServer(async (req, res) => {
@@ -165,21 +324,47 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && req.url === '/api/project-root') {
     const body = await parseBody(req);
-    if (typeof body.path !== 'string' || !path.isAbsolute(body.path)) { res.writeHead(400); res.end(); return; }
+    // Elle yazılan yolda tırnak (Windows "Yol olarak kopyala"), ~ ve sondaki ayırıcı tolere edilir.
+    let requested = typeof body.path === 'string' ? body.path.trim().replace(/^["']|["']$/g, '') : '';
+    if (requested === '~' || requested.startsWith('~/') || requested.startsWith('~\\')) requested = path.join(HOME, requested.slice(1));
+    res.setHeader('Content-Type', 'application/json');
+    if (!requested || !path.isAbsolute(requested)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: 'Tam klasör yolu girin (ör. ' + (PLATFORM === 'win32' ? 'C:\\Users\\ad\\proje' : '/Users/ad/proje') + ')' }));
+      return;
+    }
     try {
-      const root = fs.realpathSync(body.path);
-      if (!fs.statSync(root).isDirectory()) throw new Error('Dizin değil');
+      const root = fs.realpathSync(requested);
+      if (!fs.statSync(root).isDirectory()) throw Object.assign(new Error('Bu yol bir klasör değil'), { code: 'ENOTDIR' });
       projectRoot = root;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ path: root }));
-    } catch (err) { res.writeHead(400); res.end(JSON.stringify({ error: err.message })); }
+      res.writeHead(200);
+      res.end(JSON.stringify({ path: root, name: path.basename(root) || root }));
+    } catch (err) { res.writeHead(400); res.end(JSON.stringify({ error: fsErrorMessage(err) })); }
+    return;
+  }
+
+  // ─── API: İşletim sisteminin klasör seçicisi ───────────────────────
+  if (req.method === 'POST' && req.url === '/api/pick-folder') {
+    const { startPath } = await parseBody(req);
+    res.setHeader('Content-Type', 'application/json');
+    if (folderPickerOpen) { res.writeHead(409); res.end(JSON.stringify({ error: 'Klasör seçici zaten açık' })); return; }
+    folderPickerOpen = true;
+    try {
+      const picked = await pickFolder(typeof startPath === 'string' ? startPath : '');
+      res.writeHead(200);
+      res.end(JSON.stringify(picked ? { path: picked } : { cancelled: true }));
+    } catch (error) {
+      res.writeHead(error.code === 'UNSUPPORTED' ? 501 : 500);
+      res.end(JSON.stringify({ error: error.code === 'UNSUPPORTED' ? error.message : `Klasör seçici açılamadı: ${error.stderr?.trim() || error.message}` }));
+    } finally { folderPickerOpen = false; }
     return;
   }
 
   const guardedPaths = {
-    '/api/read-dir': ['path'], '/api/read-subdir': ['path'], '/api/read-file': ['path'],
+    '/api/read-dir': ['path'], '/api/read-subdir': ['path'], '/api/read-file': ['path'], '/api/list-dir': ['path'],
     '/api/save-file': ['path'], '/api/edit-file': ['path'], '/api/rename': ['oldPath', 'newPath'],
     '/api/delete': ['path'], '/api/delete-file': ['path'], '/api/mkdir': ['path'],
+    '/api/create-file': ['path'], '/api/reveal': ['path'],
     '/api/agent-stage': ['path'],
     '/api/agent-exec': ['cwd'], '/api/agent-run': ['cwd'],
   };
@@ -246,8 +431,10 @@ const server = createServer(async (req, res) => {
         const { replaceUniqueText, supportsWhitespaceMatch } = await import('./src/utils/editMatching.js');
         after = replaceUniqueText(before, oldText, newText, { allowWhitespace: supportsWhitespaceMatch(filePath) });
       }
+      if (before === after) throw new Error('Değişiklik dosyada fark oluşturmuyor; içerik zaten aynı');
       const token = randomUUID();
-      const record = { filePath, before, after, existed, root: projectRoot, type, oldText, newText };
+      const record = { filePath, before, after, existed, root: projectRoot, type, oldText, newText, createdAt: Date.now() };
+      fs.mkdirSync(stageStoreDir, { recursive: true, mode: 0o700 });
       fs.writeFileSync(stageRecordPath(token), JSON.stringify(record), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
       try {
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -258,7 +445,7 @@ const server = createServer(async (req, res) => {
       }
       stagedChanges.set(token, record);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ token, created: !existed }));
+      res.end(JSON.stringify({ token, created: !existed, content: after }));
     } catch (err) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
@@ -269,6 +456,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/api/agent-pending') {
     const pending = [...stagedChanges.entries()]
       .filter(([, change]) => change.root === projectRoot && withinProject(change.filePath))
+      .sort(([, a], [, b]) => (a.createdAt || 0) - (b.createdAt || 0))
       .map(([token, change]) => ({ token, path: change.filePath, type: change.type || 'file', content: change.after, oldText: change.oldText, newText: change.newText }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ pending }));
@@ -336,30 +524,15 @@ const server = createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'Dosya bulunamadı' }));
         return;
       }
-      let content = fs.readFileSync(filePath, 'utf-8');
-      const norm = (s) => (s || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const { replaceUniqueText, supportsWhitespaceMatch } = await import('./src/utils/editMatching.js');
       let newContent;
-      if (content.includes(oldText)) {
-        if (content.split(oldText).length !== 2) {
-          res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Eski metin birden fazla yerde bulunuyor' }));
-          return;
-        }
-        newContent = content.replace(oldText, newText);
-      } else {
-        const contentNorm = norm(content);
-        const oldNorm = norm(oldText);
-        if (!contentNorm.includes(oldNorm)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Eski metin dosyada bulunamadı' }));
-          return;
-        }
-        if (contentNorm.split(oldNorm).length !== 2) {
-          res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Eski metin birden fazla yerde bulunuyor' }));
-          return;
-        }
-        newContent = contentNorm.replace(oldNorm, norm(newText));
+      try {
+        newContent = replaceUniqueText(content, oldText, newText, { allowWhitespace: supportsWhitespaceMatch(filePath) });
+      } catch (error) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: error.message }));
+        return;
       }
       fs.writeFileSync(filePath, newContent, 'utf-8');
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -381,11 +554,44 @@ const server = createServer(async (req, res) => {
       return;
     }
     try {
-      const content = fs.readFileSync(filePath, 'utf-8');
+      if (fs.statSync(filePath).isDirectory()) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Bu yol bir klasör, dosya değil', directory: true }));
+        return;
+      }
+      const { size } = fs.statSync(filePath);
+      const name = path.basename(filePath);
+      // İkili veya çok büyük dosyalar metin olarak açılmaz; editör bunun yerine bilgi gösterir.
+      if (size > 5 * 1024 * 1024) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ content: '', name, size, tooLarge: true }));
+        return;
+      }
+      const buffer = fs.readFileSync(filePath);
+      if (buffer.subarray(0, 8000).includes(0)) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ content: '', name, size, binary: true }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ content, name: path.basename(filePath) }));
+      res.end(JSON.stringify({ content: buffer.toString('utf8'), name, size }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ─── API: Agent için dizin listesi ─────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/list-dir') {
+    const { path: dirPath } = await parseBody(req);
+    try {
+      if (!fs.existsSync(dirPath)) throw new Error('Klasör bulunamadı');
+      if (!fs.statSync(dirPath).isDirectory()) throw new Error('Bu yol bir dosya, klasör değil');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ listing: listDirForAgent(dirPath) }));
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
     }
     return;
@@ -411,78 +617,94 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ─── API: Dosya/klasör yeniden adlandır ────────────────────────────
+  // ─── API: Explorer dosya işlemleri ──────────────────────────────────
+  // Tüm yollar proje kökü içinde doğrulanmıştır (guardedPaths). Adlar Windows kurallarına göre de denetlenir.
+  const sendJson = (status, payload) => {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
+  };
+  const nameError = async (fullPath) => {
+    const { validateEntryName } = await import('./src/utils/paths.js');
+    // Kök realpath olduğu için yol da gerçek yoluna çevrilir (/tmp → /private/tmp gibi bağlantılar).
+    return validateEntryName(path.relative(projectRoot, realTargetPath(fullPath)).split(path.sep).join('/'));
+  };
+  // Aynı dosyanın iki adı (ör. yalnızca büyük/küçük harf değişikliği) üzerine yazma sayılmaz.
+  const sameEntry = (a, b) => {
+    try {
+      const first = fs.statSync(a);
+      const second = fs.statSync(b);
+      return first.ino === second.ino && first.dev === second.dev;
+    } catch { return false; }
+  };
+
+  if (req.method === 'POST' && req.url === '/api/create-file') {
+    const { path: filePath, content = '' } = await parseBody(req);
+    try {
+      const invalid = await nameError(filePath);
+      if (invalid) return sendJson(400, { error: invalid });
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      // "wx": var olan dosyanın üzerine asla yazmaz.
+      fs.writeFileSync(filePath, typeof content === 'string' ? content : '', { encoding: 'utf8', flag: 'wx' });
+      sendJson(200, { ok: true, path: filePath });
+    } catch (err) { sendJson(err.code === 'EEXIST' ? 409 : 500, { error: fsErrorMessage(err) }); }
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/api/rename') {
-    const body = await parseBody(req);
-    const { oldPath, newPath } = body;
-    if (!oldPath || !newPath) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'oldPath ve newPath gerekli' }));
-      return;
-    }
-    if (!fs.existsSync(oldPath)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Kaynak bulunamadı' }));
-      return;
-    }
+    const { oldPath, newPath } = await parseBody(req);
     try {
+      if (realTargetPath(oldPath) === projectRoot) return sendJson(400, { error: 'Proje kök klasörü yeniden adlandırılamaz' });
+      if (!fs.existsSync(oldPath)) return sendJson(404, { error: 'Kaynak bulunamadı' });
+      const invalid = await nameError(newPath);
+      if (invalid) return sendJson(400, { error: invalid });
+      if (fs.existsSync(newPath) && !sameEntry(oldPath, newPath)) return sendJson(409, { error: fsErrorMessage({ code: 'EEXIST' }) });
+      if (path.resolve(newPath).startsWith(path.resolve(oldPath) + path.sep)) return sendJson(400, { error: 'Klasör kendi içine taşınamaz' });
+      fs.mkdirSync(path.dirname(newPath), { recursive: true });
       fs.renameSync(oldPath, newPath);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, oldPath, newPath }));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
-    }
+      sendJson(200, { ok: true, oldPath, newPath });
+    } catch (err) { sendJson(500, { error: fsErrorMessage(err) }); }
     return;
   }
 
-  // ─── API: Dosya/klasör sil ──────────────────────────────────────────
-  if (req.method === 'POST' && req.url === '/api/delete') {
-    const body = await parseBody(req);
-    const targetPath = body.path;
-    if (!targetPath) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'path gerekli' }));
-      return;
-    }
-    if (!fs.existsSync(targetPath)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Hedef bulunamadı' }));
-      return;
-    }
+  // Explorer'dan silme: varsayılan olarak çöp kutusuna taşır; yalnızca açıkça istenirse kalıcı siler.
+  if (req.method === 'POST' && ['/api/delete', '/api/delete-file'].includes(req.url)) {
+    const { path: targetPath, permanent } = await parseBody(req);
     try {
-      const stat = fs.statSync(targetPath);
-      if (stat.isDirectory()) {
+      if (realTargetPath(targetPath) === projectRoot) return sendJson(400, { error: 'Proje kök klasörü silinemez' });
+      if (!fs.existsSync(targetPath)) return sendJson(404, { error: 'Dosya veya klasör bulunamadı' });
+      if (permanent === true) {
         fs.rmSync(targetPath, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(targetPath);
+        return sendJson(200, { ok: true, permanent: true });
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, path: targetPath }));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
-    }
+      try {
+        await moveToTrash(targetPath);
+      } catch (error) {
+        return sendJson(500, { error: `Çöp kutusuna taşınamadı: ${error.stderr?.trim() || fsErrorMessage(error)}`, trashFailed: true });
+      }
+      sendJson(200, { ok: true, trashed: true });
+    } catch (err) { sendJson(500, { error: fsErrorMessage(err) }); }
     return;
   }
 
-  // ─── API: Klasör oluştur ────────────────────────────────────────────
   if (req.method === 'POST' && req.url === '/api/mkdir') {
-    const body = await parseBody(req);
-    const dirPath = body.path;
-    if (!dirPath) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'path gerekli' }));
-      return;
-    }
+    const { path: dirPath, exclusive } = await parseBody(req);
     try {
+      const invalid = await nameError(dirPath);
+      if (invalid) return sendJson(400, { error: invalid });
+      // Explorer yeni klasörde var olanı bildirmek ister; agent için var olan klasör hata değildir.
+      if (exclusive === true && fs.existsSync(dirPath)) return sendJson(409, { error: fsErrorMessage({ code: 'EEXIST' }) });
       fs.mkdirSync(dirPath, { recursive: true });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, path: dirPath }));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
-    }
+      sendJson(200, { ok: true, path: dirPath });
+    } catch (err) { sendJson(500, { error: fsErrorMessage(err) }); }
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/reveal') {
+    const { path: targetPath } = await parseBody(req);
+    try {
+      await revealInFileManager(targetPath);
+      sendJson(200, { ok: true });
+    } catch (err) { sendJson(500, { error: fsErrorMessage(err) }); }
     return;
   }
 
@@ -503,46 +725,30 @@ const server = createServer(async (req, res) => {
 
     res.write('retry: 1000\n\n');
     let debounceTimer;
+    const changed = new Set();
+    const onChange = (eventType, filename) => {
+      const relative = String(filename || '').split(path.sep).join('/');
+      // Bağımlılık ve git klasörlerindeki değişiklikler explorer'ı gereksiz yere yeniler.
+      if (/(^|\/)(node_modules|\.git)(\/|$)/.test(relative)) return;
+      changed.add(relative);
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        res.write(`data: ${JSON.stringify({ type: 'fs-change', paths: [...changed].slice(0, 200) })}\n\n`);
+        changed.clear();
+      }, 300);
+    };
 
+    let watcher;
     try {
-      const watcher = fs.watch(watchPath, { recursive: true }, (eventType, filename) => {
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-          res.write(`data: ${JSON.stringify({ type: 'fs-change', eventType, filename })}\n\n`);
-        }, 500);
-      });
-
-      req.on('close', () => {
-        watcher.close();
-      });
-    } catch (err) {
-      res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
-    }
-    return;
-  }
-
-  // ─── API: Dosya Silme (Yapay Zeka veya Client İçin) ────────────────────
-  if (req.method === 'POST' && req.url === '/api/delete-file') {
-    const body = await parseBody(req);
-    const targetPath = body.path;
-    try {
-      if (targetPath && fs.existsSync(targetPath)) {
-        const stats = fs.statSync(targetPath);
-        if (stats.isDirectory()) {
-          fs.rmSync(targetPath, { recursive: true, force: true });
-        } else {
-          fs.unlinkSync(targetPath);
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true }));
-      } else {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Dosya veya klasör bulunamadı' }));
+      watcher = fs.watch(watchPath, { recursive: true }, onChange);
+    } catch {
+      // Eski Node sürümlerinde Linux özyinelemeli izlemeyi desteklemez; en azından kök izlenir.
+      try { watcher = fs.watch(watchPath, onChange); } catch (err) {
+        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
       }
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
     }
+    watcher?.on('error', () => {});
+    req.on('close', () => { clearTimeout(debounceTimer); watcher?.close(); });
     return;
   }
 
@@ -752,6 +958,20 @@ const server = createServer(async (req, res) => {
       if (!upstream.ok) throw new Error(`Model listesi alınamadı (${upstream.status})`);
       const data = await upstream.json();
       const models = Array.isArray(data.data) ? data.data : [];
+      // LM Studio yüklü modelin gerçek bağlam uzunluğunu ayrı uç noktada bildirir; istem bütçesi bununla hesaplanır.
+      if (appSettings.ai.provider === 'local') {
+        try {
+          const details = await fetch(new URL('/api/v0/models', base).href, { signal: AbortSignal.timeout(3000) });
+          if (details.ok) {
+            const byId = new Map(((await details.json()).data || []).map(model => [model.id, model]));
+            for (const model of models) {
+              const info = byId.get(model.id);
+              if (info?.type === 'embeddings') model.embedding = true;
+              if (info?.loaded_context_length) model.context_length = info.loaded_context_length;
+            }
+          }
+        } catch { /* LM Studio dışındaki sunucular bu uç noktayı sunmaz */ }
+      }
       if (appSettings.ai.provider === 'remote' && appSettings.ai.model && !models.some(model => model.id === appSettings.ai.model)) models.unshift({ id: appSettings.ai.model });
       const selectedModel = models.some(model => model.id === appSettings.ai.model) ? appSettings.ai.model : models[0]?.id || '';
       res.writeHead(200, { 'Content-Type': 'application/json' });

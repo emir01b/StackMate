@@ -24,7 +24,7 @@
 .app-root.density-compact .navbar-logo { height: 27px; }
 .app-root.density-compact .file-tree-node { padding-top: 1px; padding-bottom: 1px; }
 .app-root.density-compact .message { padding-top: 6px; padding-bottom: 6px; }
-.app-root.density-compact .file-explorer-header { height: 31px; }
+.app-root.density-compact .fe-header { height: 31px; }
 
 .app-main-wrapper {
   display: flex;

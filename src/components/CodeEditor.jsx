@@ -2,6 +2,7 @@ import React, { useRef, useCallback, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import { Save } from 'lucide-react';
 import { apiSaveFile } from '../utils/fileApi';
+import { joinProjectPath } from '../utils/paths';
 import './CodeEditor.css';
 
 const LANGUAGE_MAP = {
@@ -26,6 +27,7 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
   const editorRef = useRef(null);
   const saveToastRef = useRef(null);
   const contentChangeTimerRef = useRef(null);
+  const pendingSaveRef = useRef(null);
 
   const showToast = (msg, isError = false) => {
     if (!saveToastRef.current) return;
@@ -39,43 +41,37 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
 
   // ─── Tüm hook'lar erken return'den ÖNCE ─────────────────────────────────
 
-  const doSave = useCallback(async () => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    const content = editor.getValue();
-
-    if (file?.handle) {
+  const saveContent = useCallback(async (targetFile, content) => {
+    if (targetFile?.handle) {
       try {
-        const writable = await file.handle.createWritable();
+        const writable = await targetFile.handle.createWritable();
         await writable.write(content);
         await writable.close();
-        onSave?.(content);
+        onSave?.(content, targetFile.id);
         showToast('✓ Kaydedildi');
       } catch (err) {
         showToast('✗ ' + err.message, true);
       }
-    } else if (file && currentDirPath) {
+    } else if (targetFile?.relativePath && currentDirPath) {
       try {
-        const relativePath = file.path ? file.path.split('/').slice(1).join('\\') : file.name;
-        const filePath = currentDirPath + '\\' + relativePath;
-        await apiSaveFile(filePath, content);
-        onSave?.(content);
+        await apiSaveFile(joinProjectPath(currentDirPath, targetFile.relativePath), content);
+        onSave?.(content, targetFile.id);
         showToast('✓ Kaydedildi');
       } catch (err) {
         showToast('✗ ' + err.message, true);
       }
-    } else if (file) {
+    } else if (targetFile) {
       try {
         const blob = new Blob([content], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = file.name || 'untitled.txt';
+        a.download = targetFile.name || 'untitled.txt';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        onSave?.(content);
+        onSave?.(content, targetFile.id);
         showToast('✓ İndirildi (tarayıcı kısıtlaması)');
       } catch (err) {
         showToast('✗ ' + err.message, true);
@@ -83,26 +79,48 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
     } else {
       showToast('✗ Kaydedilecek açık dosya yok', true);
     }
-  }, [file, onSave, currentDirPath]);
+  }, [onSave, currentDirPath]);
+
+  const doSave = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    clearTimeout(contentChangeTimerRef.current);
+    pendingSaveRef.current = null;
+    return saveContent(file, editor.getValue());
+  }, [file, saveContent]);
+
+  // Monaco komutu yalnızca mount anında kaydedilir; güncel doSave'e ref üzerinden ulaşılır.
+  const doSaveRef = useRef(doSave);
+  useEffect(() => { doSaveRef.current = doSave; }, [doSave]);
 
   const handleEditorChange = useCallback((value) => {
     if (contentChangeTimerRef.current) clearTimeout(contentChangeTimerRef.current);
     onContentChange?.(value);
-    if (editorSettings?.autoSave !== false) {
-      contentChangeTimerRef.current = setTimeout(doSave, editorSettings?.autoSaveDelay || 1000);
+    // Diske bağlı olmayan sekmeler (Adsız, salt okunur dosya) otomatik kaydedilmez; aksi halde her tuşta indirme başlar.
+    if (editorSettings?.autoSave !== false && (file?.relativePath || file?.handle)) {
+      pendingSaveRef.current = { file, content: value };
+      contentChangeTimerRef.current = setTimeout(() => doSaveRef.current(), editorSettings?.autoSaveDelay || 1000);
     }
-  }, [onContentChange, doSave, editorSettings?.autoSave, editorSettings?.autoSaveDelay]);
+  }, [onContentChange, file, editorSettings?.autoSave, editorSettings?.autoSaveDelay]);
 
-  useEffect(() => () => clearTimeout(contentChangeTimerRef.current), [file?.id]);
+  // Sekme değişince bekleyen otomatik kaydetmeyi iptal etmek yerine hemen uygula.
+  const saveContentRef = useRef(saveContent);
+  useEffect(() => { saveContentRef.current = saveContent; }, [saveContent]);
+  useEffect(() => () => {
+    clearTimeout(contentChangeTimerRef.current);
+    const pending = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+    if (pending) saveContentRef.current(pending.file, pending.content);
+  }, [file?.id]);
 
   const handleMount = useCallback((editor, monaco) => {
     editorRef.current = editor;
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, doSave);
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => doSaveRef.current());
     editor.onDidChangeCursorPosition((e) => {
       onCursorChange?.({ line: e.position.lineNumber, col: e.position.column });
     });
     onEditorMount?.(editor);
-  }, [doSave, onCursorChange, onEditorMount]);
+  }, [onCursorChange, onEditorMount]);
 
   // ─── Erken return (hook'lardan SONRA) ───────────────────────────────────
   if (!file) {
@@ -113,6 +131,20 @@ const CodeEditor = ({ file, onSave, onContentChange, currentDirPath, onCursorCha
             <div className="placeholder-icon">📄</div>
             <p className="placeholder-title">Dosya seçilmedi</p>
             <p className="placeholder-subtitle">Sol panelden bir dosya seçin</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (file.binary || file.tooLarge) {
+    return (
+      <div className="code-editor-container">
+        <div className="editor-placeholder">
+          <div className="placeholder-content">
+            <div className="placeholder-icon">📦</div>
+            <p className="placeholder-title">{file.name}</p>
+            <p className="placeholder-subtitle">{file.binary ? 'Bu dosya ikili (metin olmayan) bir dosya; editörde gösterilemez.' : 'Bu dosya 5 MB\'tan büyük; editörde açılmadı.'}</p>
           </div>
         </div>
       </div>

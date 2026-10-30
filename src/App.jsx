@@ -9,91 +9,47 @@ import SettingsPanel from './components/SettingsPanel';
 import Terminal from './components/Terminal';
 import ErrorBoundary from './components/ErrorBoundary';
 import ResizeHandle from './components/ResizeHandle';
-import {
-  saveDirectoryHandle, loadDirectoryHandle,
-  saveOpenFileHandles, loadOpenFileHandles,
-  saveActiveTab, loadActiveTab,
-  saveTerminalState, loadTerminalState,
-  savePanelSizes, loadPanelSizes,
-} from './utils/storage';
-import { apiReadDir, apiSaveFile, apiReadFile, apiRename, apiDelete, apiMkdir } from './utils/fileApi';
+import { saveTerminalState, loadTerminalState, savePanelSizes, loadPanelSizes } from './utils/storage';
+import { apiOpenProject, apiPickFolder, apiReadFile, apiSaveFile } from './utils/fileApi';
+import { joinProjectPath } from './utils/paths';
 import './App.css';
 
-// Fallback: Düz dosya listesinden ağaç yapısı oluştur
-const buildTreeFromFileList = (fileList) => {
-  const rootName = fileList[0]?.webkitRelativePath?.split('/')[0] || 'Proje';
-  const root = { name: rootName, type: 'folder', children: [], handle: null };
+const LAST_PROJECT_KEY = 'stackmate_verified_project_path';
+const RECENT_PROJECTS_KEY = 'stackmate_recent_projects';
+const tabsKey = (projectPath) => `stackmate_tabs:${projectPath}`;
 
-  for (const file of fileList) {
-    const parts = file.webkitRelativePath.split('/');
-    let current = root;
-
-    for (let i = 1; i < parts.length; i++) {
-      const partName = parts[i];
-      const isLastPart = i === parts.length - 1;
-
-      if (isLastPart) {
-        // Dosya
-        current.children.push({
-          name: partName,
-          type: 'file',
-          handle: null,
-          content: null,
-          _file: file, // Orijinal File nesnesi (lazy read için)
-        });
-      } else {
-        // Klasör
-        let folder = current.children.find(c => c.name === partName && c.type === 'folder');
-        if (!folder) {
-          folder = { name: partName, type: 'folder', children: [], handle: null };
-          current.children.push(folder);
-        }
-        current = folder;
-      }
-    }
-  }
-
-  // Sırala: klasörler önce, sonra dosyalar (alfabetik)
-  const sortTree = (node) => {
-    if (node.children) {
-      node.children.sort((a, b) => {
-        if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-      node.children.forEach(sortTree);
-    }
-  };
-  sortTree(root);
-  return root;
+const readJson = (key, fallback) => {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+};
+const writeJson = (key, value) => {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* depolama kapalı olabilir */ }
 };
 
-// Klasör içeriğini oku (sadece ilk seviye, lazy load için)
-const readDirectory = async (dirHandle) => {
-  const entries = [];
-  for await (const entry of dirHandle.values()) {
-    entries.push({
-      name: entry.name,
-      type: entry.kind === 'directory' ? 'folder' : 'file',
-      handle: entry,
-      children: entry.kind === 'directory' ? [] : undefined,
-    });
-  }
-  entries.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-  return { name: dirHandle.name, type: 'folder', children: entries, handle: dirHandle };
-};
+// Proje dosyası sekmesi: kimlik "ProjeAdı/göreli/yol" biçimindedir (CodeEditor kaydederken bunu kullanır).
+const makeProjectTab = (projectName, relativePath, data) => ({
+  id: `${projectName}/${relativePath}`,
+  path: `${projectName}/${relativePath}`,
+  relativePath,
+  name: relativePath.split('/').pop(),
+  content: data.content || '',
+  binary: !!data.binary,
+  tooLarge: !!data.tooLarge,
+  modified: false,
+});
+
+const isInside = (relativePath, folder) => relativePath === folder || relativePath.startsWith(`${folder}/`);
 
 function App() {
-  const [files, setFiles] = useState(null);
-  const [currentDirHandle, setCurrentDirHandle] = useState(null);
-  const [currentDirPath, setCurrentDirPath] = useState(null); // Backend API için sunucu yolu
-  const [folderPathDialogOpen, setFolderPathDialogOpen] = useState(false);
-  const [folderPathDraft, setFolderPathDraft] = useState('');
-  const [folderPathError, setFolderPathError] = useState('');
+  const [project, setProject] = useState(null); // { path, name } — gerçek (realpath) yol
+  const [recentProjects, setRecentProjects] = useState(() => readJson(RECENT_PROJECTS_KEY, []));
+  const [backendOnline, setBackendOnline] = useState(true);
+  const [platform, setPlatform] = useState('');
+  const [folderDialog, setFolderDialog] = useState(null); // { draft, error }
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState(null);
+  const explorerRef = useRef(null);
+  const projectRef = useRef(project);
+  useEffect(() => { projectRef.current = project; }, [project]);
 
   useEffect(() => {
     const refresh = () => fetch('http://localhost:3001/api/settings')
@@ -117,8 +73,8 @@ function App() {
   }, []);
 
   // Tab sistemi
-  const [openTabs, setOpenTabs] = useState([]); // [{ name, content, handle, modified }]
-  const [activeTab, setActiveTab] = useState(null); // aktif tab'ın tam kimliği
+  const [openTabs, setOpenTabs] = useState([]);
+  const [activeTab, setActiveTab] = useState(null);
   const openTabsRef = useRef(openTabs);
   useEffect(() => { openTabsRef.current = openTabs; }, [openTabs]);
 
@@ -135,133 +91,148 @@ function App() {
   const [aiWidth, setAIWidth] = useState(null);
   const [terminalHeight, setTerminalHeight] = useState(null);
 
-  // Aktif tab'ın dosya objesi
   const activeFile = openTabs.find(t => t.id === activeTab) || null;
   const activeFileRef = useRef(activeFile);
   useEffect(() => { activeFileRef.current = activeFile; }, [activeFile]);
 
-  // ─── BAŞLANGIÇ: Kayıtlı state'i geri yükle ───────────────────────────────
-  useEffect(() => {
-    const restore = async () => {
-      // Terminal durumunu geri yükle
-      setShowTerminal(loadTerminalState());
+  // ─── PROJE AÇMA ────────────────────────────────────────────────────────────
+  const openProject = useCallback(async (dirPath) => {
+    if (openTabsRef.current.some(tab => tab.modified)
+      && !window.confirm('Kaydedilmemiş değişiklikler var. Yine de başka bir klasör açılsın mı?')) return false;
+    const { path: root, name } = await apiOpenProject(dirPath);
+    const projectName = name || root;
+    setProject({ path: root, name: projectName });
+    localStorage.setItem(LAST_PROJECT_KEY, root);
+    setRecentProjects(prev => {
+      const next = [root, ...prev.filter(item => item !== root)].slice(0, 8);
+      writeJson(RECENT_PROJECTS_KEY, next);
+      return next;
+    });
 
-      // Panel boyutlarını geri yükle
-      const savedSizes = loadPanelSizes();
-      if (savedSizes) {
-        if (savedSizes.explorerWidth) setExplorerWidth(savedSizes.explorerWidth);
-        if (savedSizes.aiWidth) setAIWidth(savedSizes.aiWidth);
-        if (savedSizes.terminalHeight) setTerminalHeight(savedSizes.terminalHeight);
-      }
-
-      // Son klasörü geri yükle
-      const dirHandle = await loadDirectoryHandle();
-      if (!dirHandle) return;
-      try {
-        const perm = await dirHandle.queryPermission({ mode: 'readwrite' });
-        const granted = perm === 'granted'
-          || (await dirHandle.requestPermission({ mode: 'readwrite' })) === 'granted';
-        if (!granted) return;
-
-        const structure = await readDirectory(dirHandle);
-        setFiles(structure);
-        setCurrentDirHandle(dirHandle);
-
-        // Yalnızca daha önce kullanıcı tarafından doğrulanmış backend yolunu kullan.
-        const verifiedPath = localStorage.getItem('stackmate_verified_project_path');
-        if (verifiedPath && verifiedPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() === dirHandle.name) {
-          try {
-            const response = await fetch('http://localhost:3001/api/project-root', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: verifiedPath }),
-            });
-            setCurrentDirPath(response.ok ? (await response.json()).path : null);
-          } catch { setCurrentDirPath(null); }
-        } else setCurrentDirPath(null);
-
-        // Açık dosyaları geri yükle
-        const savedHandles = await loadOpenFileHandles();
-        const savedActiveTab = await loadActiveTab();
-        if (savedHandles && savedHandles.length > 0) {
-          const restoredTabs = [];
-          const savedPaths = JSON.parse(localStorage.getItem('stackmate_open_tab_paths') || '[]');
-          for (const [index, h] of savedHandles.entries()) {
-            try {
-              const fp = await h.queryPermission({ mode: 'readwrite' });
-              if (fp === 'granted' || (await h.requestPermission({ mode: 'readwrite' })) === 'granted') {
-                const f = await h.getFile();
-                const content = await f.text();
-                const tabPath = savedPaths[index] || `${h.name}-${index}`;
-                restoredTabs.push({ id: tabPath, path: savedPaths[index] || null, name: h.name, content, handle: h, modified: false });
-              }
-            } catch (_) { /* dosya erişilemez, atla */ }
-          }
-          if (restoredTabs.length > 0) {
-            setOpenTabs(restoredTabs);
-            const activeExists = restoredTabs.find(t => t.id === savedActiveTab);
-            setActiveTab(activeExists ? savedActiveTab : restoredTabs[0].id);
-          }
-        }
-      } catch (_) {
-        // State geri yükleme sessizce atlanır
-      }
-    };
-    restore();
+    // Bu projede açık bırakılan sekmeleri geri yükle (silinmiş dosyalar atlanır).
+    const saved = readJson(tabsKey(root), {});
+    const tabs = [];
+    for (const relativePath of Array.isArray(saved.tabs) ? saved.tabs : []) {
+      try { tabs.push(makeProjectTab(projectName, relativePath, await apiReadFile(joinProjectPath(root, relativePath)))); } catch { /* dosya artık yok */ }
+    }
+    setOpenTabs(tabs);
+    setActiveTab(tabs.find(tab => tab.relativePath === saved.active)?.id || tabs[0]?.id || null);
+    return true;
   }, []);
 
-  // ─── TAB İŞLEMLERİ ────────────────────────────────────────────────────────
-  const openFileInTab = async (fileObj) => {
-    const tabId = fileObj.path || (!fileObj.external && files?.name ? `${files.name}/${fileObj.name}` : fileObj.name);
-    // Zaten açıksa sadece aktif yap
-    const existing = openTabs.find(t => t.id === tabId);
-    if (existing) {
-      setActiveTab(tabId);
-      await saveActiveTab(tabId);
-      return;
+  const showFolderDialog = useCallback((error = '') => {
+    setFolderDialog({ draft: projectRef.current?.path || localStorage.getItem(LAST_PROJECT_KEY) || '', error });
+  }, []);
+
+  // İşletim sisteminin klasör seçicisi (Finder / Dosya Gezgini); kullanılamazsa yol yazma penceresine düşülür.
+  const pickFolder = useCallback(async () => {
+    try {
+      const current = projectRef.current?.path;
+      const result = await apiPickFolder(current ? current.replace(/[\\/][^\\/]+[\\/]?$/, '') : undefined);
+      if (result.cancelled) return;
+      await openProject(result.path);
+    } catch (error) {
+      if (error.status === 409) return; // Seçici zaten açık.
+      showFolderDialog(error.message);
+    }
+  }, [openProject, showFolderDialog]);
+
+  const openRecent = useCallback(async (projectPath) => {
+    try { await openProject(projectPath); } catch (error) {
+      setRecentProjects(prev => {
+        const next = prev.filter(item => item !== projectPath);
+        writeJson(RECENT_PROJECTS_KEY, next);
+        return next;
+      });
+      showFolderDialog(`${projectPath}: ${error.message}`);
+    }
+  }, [openProject, showFolderDialog]);
+
+  const submitFolderDialog = async (event) => {
+    event.preventDefault();
+    if (!folderDialog?.draft.trim()) return;
+    try {
+      if (await openProject(folderDialog.draft.trim())) setFolderDialog(null);
+    } catch (error) {
+      setFolderDialog(dialog => ({ ...dialog, error: error.message }));
+    }
+  };
+
+  // ─── BAŞLANGIÇ: Backend'i bekle, son projeyi ve panel durumunu geri yükle ──
+  useEffect(() => {
+    setShowTerminal(loadTerminalState());
+    const savedSizes = loadPanelSizes();
+    if (savedSizes) {
+      if (savedSizes.explorerWidth) setExplorerWidth(savedSizes.explorerWidth);
+      if (savedSizes.aiWidth) setAIWidth(savedSizes.aiWidth);
+      if (savedSizes.terminalHeight) setTerminalHeight(savedSizes.terminalHeight);
     }
 
-    // İçeriği oku
-    let content = fileObj.content || '';
-    if (fileObj.handle && !fileObj.content) {
+    let cancelled = false;
+    let timer;
+    const connect = async () => {
       try {
-        const f = await fileObj.handle.getFile();
-        content = await f.text();
-      } catch (e) { content = ''; }
-    }
+        const response = await fetch('http://localhost:3001/api/os');
+        const { platform: serverPlatform } = await response.json();
+        if (cancelled) return;
+        setPlatform(serverPlatform);
+        setBackendOnline(true);
+        const last = localStorage.getItem(LAST_PROJECT_KEY);
+        if (last && !projectRef.current) await openProject(last).catch(() => {});
+      } catch {
+        if (cancelled) return;
+        setBackendOnline(false);
+        timer = setTimeout(connect, 3000); // Backend sonradan başlatılırsa kendiliğinden bağlan.
+      }
+    };
+    connect();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [openProject]);
 
-    const newTab = { id: tabId, path: fileObj.path || (!fileObj.external && files?.name ? tabId : null), name: fileObj.name, content, handle: fileObj.handle, modified: false };
-    const newTabs = [...openTabs, newTab];
-    setOpenTabs(newTabs);
-    setActiveTab(tabId);
+  // Açık sekmeleri proje bazında hatırla.
+  useEffect(() => {
+    if (!project) return;
+    const projectTabs = openTabs.filter(tab => tab.relativePath);
+    writeJson(tabsKey(project.path), {
+      tabs: projectTabs.map(tab => tab.relativePath),
+      active: projectTabs.find(tab => tab.id === activeTab)?.relativePath || null,
+    });
+  }, [project, openTabs, activeTab]);
 
-    // Kaydet
-    await saveActiveTab(tabId);
-    const handles = newTabs.filter(t => t.handle).map(t => t.handle);
-    await saveOpenFileHandles(handles);
-    localStorage.setItem('stackmate_open_tab_paths', JSON.stringify(newTabs.filter(t => t.handle).map(t => t.path)));
-  };
-
-  const closeTab = async (tab) => {
-    const newTabs = openTabs.filter(t => t.id !== tab.id);
-    setOpenTabs(newTabs);
-    if (activeTab === tab.id) {
-      const newActive = newTabs.length > 0 ? newTabs[newTabs.length - 1].id : null;
-      setActiveTab(newActive);
-      await saveActiveTab(newActive);
-    }
-    const handles = newTabs.filter(t => t.handle).map(t => t.handle);
-    await saveOpenFileHandles(handles);
-    localStorage.setItem('stackmate_open_tab_paths', JSON.stringify(newTabs.filter(t => t.handle).map(t => t.path)));
-  };
-
-  const handleTabClick = async (tab) => {
+  // ─── TAB İŞLEMLERİ ────────────────────────────────────────────────────────
+  const addOrActivateTab = (tab) => {
+    if (!openTabsRef.current.some(item => item.id === tab.id)) setOpenTabs(prev => [...prev, tab]);
     setActiveTab(tab.id);
-    await saveActiveTab(tab.id);
+  };
+
+  const openProjectFile = async (relativePath) => {
+    const current = projectRef.current;
+    if (!current || !relativePath) return;
+    const existing = openTabsRef.current.find(tab => tab.relativePath === relativePath);
+    explorerRef.current?.reveal(relativePath);
+    if (existing) { setActiveTab(existing.id); return; }
+    try {
+      addOrActivateTab(makeProjectTab(current.name, relativePath, await apiReadFile(joinProjectPath(current.path, relativePath))));
+    } catch (err) {
+      alert(`Dosya açılamadı: ${err.message}`);
+    }
+  };
+
+  const closeTab = (tab) => {
+    const remaining = openTabs.filter(t => t.id !== tab.id);
+    setOpenTabs(remaining);
+    if (activeTab === tab.id) setActiveTab(remaining.length > 0 ? remaining[remaining.length - 1].id : null);
+  };
+
+  const handleTabClick = (tab) => {
+    setActiveTab(tab.id);
+    if (tab.relativePath) explorerRef.current?.reveal(tab.relativePath);
   };
 
   // CodeEditor içerik kaydedildiğinde tab'ı güncelle
-  const handleSave = (savedContent) => {
+  const handleSave = (savedContent, tabId = activeTab) => {
     setOpenTabs(prev => prev.map(t =>
-      t.id === activeTab ? { ...t, content: savedContent, modified: false } : t
+      t.id === tabId ? { ...t, content: savedContent, modified: false } : t
     ));
   };
 
@@ -272,77 +243,62 @@ function App() {
     ));
   }, [activeTab]);
 
-  // Explorer'ı yenile + açık sekmelerin içeriklerini diskten tekrar oku
+  // Explorer'ı yenile + değiştirilmemiş açık sekmeleri diskten tekrar oku (agent veya dış değişiklikler).
   const refreshExplorer = useCallback(async () => {
-    // 1. Dosya ağacını yenile
-    if (currentDirHandle) {
-      try {
-        const structure = await readDirectory(currentDirHandle);
-        setFiles(structure);
-      } catch (err) {
-        console.error('Explorer yenilenemedi:', err.message);
-      }
-    } else if (currentDirPath) {
-      try {
-        const tree = await apiReadDir(currentDirPath, true);
-        setFiles(tree);
-      } catch (err) {
-        console.error('Explorer yenilenemedi:', err.message);
-      }
-    }
-
-    // 2. Yalnızca değiştirilmemiş açık sekmeleri diskten yenile.
-    const refreshed = await Promise.all(openTabsRef.current.filter(tab => !tab.modified).map(async tab => {
-      try {
-        if (tab.handle) return { id: tab.id, content: await (await tab.handle.getFile()).text() };
-        if (currentDirPath) {
-          const relativePath = tab.path ? tab.path.split('/').slice(1).join('\\') : tab.name;
-          const result = await apiReadFile(currentDirPath + '\\' + relativePath);
-          return { id: tab.id, content: result.content };
-        }
-      } catch { /* Silinmiş dosya mevcut sekmede korunur. */ }
-      return null;
-    }));
+    const current = projectRef.current;
+    if (!current) return;
+    explorerRef.current?.refresh();
+    const refreshed = await Promise.all(openTabsRef.current
+      .filter(tab => tab.relativePath && !tab.modified && !tab.binary && !tab.tooLarge)
+      .map(async tab => {
+        try { return { id: tab.id, content: (await apiReadFile(joinProjectPath(current.path, tab.relativePath))).content }; }
+        catch { return null; } // Silinmiş dosya mevcut sekmede korunur.
+      }));
     const byId = new Map(refreshed.filter(Boolean).map(item => [item.id, item.content]));
-    setOpenTabs(current => {
+    setOpenTabs(tabs => {
       let changed = false;
-      const next = current.map(tab => {
+      const next = tabs.map(tab => {
         if (tab.modified || !byId.has(tab.id) || byId.get(tab.id) === tab.content) return tab;
         changed = true;
         return { ...tab, content: byId.get(tab.id) };
       });
-      return changed ? next : current;
+      return changed ? next : tabs;
     });
-  }, [currentDirHandle, currentDirPath]);
+  }, []);
 
-  // ─── ANLIK DOSYA İZLEME (FILE WATCHER via SSE veya POLLING) ───────────────
+  // ─── ANLIK DOSYA İZLEME (SSE) ─────────────────────────────────────────────
   useEffect(() => {
-    let eventSource;
-    let fallbackInterval;
-
-    if (currentDirPath) {
-      // Backend (Node.js) üzerinden süper hızlı anlık izleyici
-      eventSource = new EventSource(`http://localhost:3001/api/fs-watch?path=${encodeURIComponent(currentDirPath)}`);
-      eventSource.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.type === 'fs-change') {
-            refreshExplorer();
-          }
-        } catch (err) { }
-      };
-    } else if (currentDirHandle) {
-      // Tarayıcı Native File System Api kullananlar için arka planda düzenli tarama (10 saniye)
-      fallbackInterval = setInterval(() => {
-        refreshExplorer();
-      }, 10000);
-    }
-
-    return () => {
-      if (eventSource) eventSource.close();
-      if (fallbackInterval) clearInterval(fallbackInterval);
+    if (!project) return undefined;
+    const eventSource = new EventSource(`http://localhost:3001/api/fs-watch?path=${encodeURIComponent(project.path)}`);
+    eventSource.onmessage = (event) => {
+      try {
+        if (JSON.parse(event.data).type === 'fs-change') refreshExplorer();
+      } catch { /* geçersiz olay */ }
     };
-  }, [currentDirPath, currentDirHandle, refreshExplorer]);
+    return () => eventSource.close();
+  }, [project, refreshExplorer]);
+
+  // Explorer'da yeniden adlandırılan dosya/klasörün açık sekmelerini güncelle.
+  const handleEntryRenamed = useCallback((oldPath, newPath) => {
+    const current = projectRef.current;
+    const renamedIds = new Map();
+    const rename = (tab) => {
+      if (!tab.relativePath || !isInside(tab.relativePath, oldPath)) return tab;
+      const relativePath = newPath + tab.relativePath.slice(oldPath.length);
+      const id = `${current.name}/${relativePath}`;
+      renamedIds.set(tab.id, id);
+      return { ...tab, relativePath, id, path: id, name: relativePath.split('/').pop() };
+    };
+    const next = openTabsRef.current.map(rename);
+    setOpenTabs(next);
+    setActiveTab(active => renamedIds.get(active) || active);
+  }, []);
+
+  const handleEntryDeleted = useCallback((deletedPath) => {
+    const remaining = openTabsRef.current.filter(tab => !tab.relativePath || !isInside(tab.relativePath, deletedPath));
+    setOpenTabs(remaining);
+    setActiveTab(active => (remaining.some(tab => tab.id === active) ? active : remaining[remaining.length - 1]?.id || null));
+  }, []);
 
   // Global Ctrl+S yakalama — tarayıcının kendi kaydet diyaloğunu engelle
   useEffect(() => {
@@ -355,206 +311,54 @@ function App() {
     return () => window.removeEventListener('keydown', handleGlobalSave);
   }, []);
 
-  // ─── DOSYA YENİDEN ADLANDIR ─────────────────────────────────────────
-  const handleRename = useCallback(async (node) => {
-    const newName = prompt('Yeni adı girin:', node.name);
-    if (!newName || !newName.trim() || newName.trim() === node.name) return;
-    const trimmed = newName.trim();
-
-    if (currentDirPath) {
-      try {
-        // node.path: "ProjeAdı/Alt/dosya.txt" gibi
-        // root kısmını kaldırıp tam yolu oluştur
-        const parts = node.path.split('/');
-        parts.shift(); // root klasör adını kaldır
-        const relativePath = parts.join('\\');
-        const oldFullPath = currentDirPath + '\\' + relativePath;
-
-        // Yeni tam yol: parent dizin + yeni ad
-        const parentParts = [...parts];
-        parentParts.pop();
-        const parentDir = parentParts.length > 0
-          ? currentDirPath + '\\' + parentParts.join('\\')
-          : currentDirPath;
-        const newFullPath = parentDir + '\\' + trimmed;
-
-        await apiRename(oldFullPath, newFullPath);
-
-        // Eğer açık bir sekmeyse tab adını da güncelle
-        const newId = node.path.split('/').slice(0, -1).concat(trimmed).join('/');
-        setOpenTabs(prev => prev.map(t => {
-          if (t.id !== node.path && !t.id.startsWith(node.path + '/')) return t;
-          const id = newId + t.id.slice(node.path.length);
-          return { ...t, id, path: id, name: t.id === node.path ? trimmed : t.name };
-        }));
-        if (activeTab === node.path || activeTab?.startsWith(node.path + '/')) {
-          const nextActive = newId + activeTab.slice(node.path.length);
-          setActiveTab(nextActive);
-          await saveActiveTab(nextActive);
-        }
-
-        await refreshExplorer();
-      } catch (err) {
-        alert('Yeniden adlandırma hatası: ' + err.message);
-      }
-    }
-  }, [currentDirPath, activeTab, refreshExplorer]);
-
-  // ─── DOSYA SİL ─────────────────────────────────────────────────────
-  const handleDelete = useCallback(async (node) => {
-    const typeText = node.type === 'folder' ? 'klasörü' : 'dosyayı';
-    if (!confirm(`"${node.name}" ${typeText} silmek istediğinize emin misiniz?`)) return;
-
-    if (currentDirPath) {
-      try {
-        const parts = node.path.split('/');
-        parts.shift();
-        const relativePath = parts.join('\\');
-        const fullPath = currentDirPath + '\\' + relativePath;
-
-        await apiDelete(fullPath);
-
-        // Açık sekmeyse kapat
-        setOpenTabs(prev => prev.filter(t => t.id !== node.path && !t.id.startsWith(node.path + '/')));
-        if (activeTab === node.path || activeTab?.startsWith(node.path + '/')) {
-          setActiveTab(null);
-          await saveActiveTab(null);
-        }
-
-        await refreshExplorer();
-      } catch (err) {
-        alert('Silme hatası: ' + err.message);
-      }
-    }
-  }, [currentDirPath, activeTab, refreshExplorer]);
-
   // ─── RESIZE HANDLERS ──────────────────────────────────────────────────────
-  const explorerRef = useRef(null);
+  const explorerPanelRef = useRef(null);
   const aiRef = useRef(null);
   const terminalRef = useRef(null);
 
   const handleExplorerResize = (newWidth) => {
-    const min = 150;
-    const max = 600;
-    const clamped = Math.max(min, Math.min(max, newWidth));
+    const clamped = Math.max(150, Math.min(600, newWidth));
     setExplorerWidth(clamped);
     savePanelSizes({ explorerWidth: clamped, aiWidth, terminalHeight });
   };
 
   const handleAIResize = (newWidth) => {
-    const min = 200;
-    const max = 800;
-    const clamped = Math.max(min, Math.min(max, newWidth));
+    const clamped = Math.max(200, Math.min(800, newWidth));
     setAIWidth(clamped);
     savePanelSizes({ explorerWidth, aiWidth: clamped, terminalHeight });
   };
 
   const handleTerminalResize = (newHeight) => {
-    const min = 100;
-    const max = window.innerHeight * 0.7;
-    const clamped = Math.max(min, Math.min(max, newHeight));
+    const clamped = Math.max(100, Math.min(window.innerHeight * 0.7, newHeight));
     setTerminalHeight(clamped);
     savePanelSizes({ explorerWidth, aiWidth, terminalHeight: clamped });
   };
 
-  const getExplorerResizeStart = () => {
-    return explorerRef.current?.offsetWidth || 0;
-  };
-
-  const getAIResizeStart = () => {
-    return aiRef.current?.offsetWidth || 0;
-  };
-
-  const getTerminalResizeStart = () => {
-    return terminalRef.current?.offsetHeight || 0;
-  };
+  const getExplorerResizeStart = () => explorerPanelRef.current?.offsetWidth || 0;
+  const getAIResizeStart = () => aiRef.current?.offsetWidth || 0;
+  const getTerminalResizeStart = () => terminalRef.current?.offsetHeight || 0;
 
   // ─── FILE / VIEW ACTION ────────────────────────────────────────────────────
-  // Gizli input referansları (fallback için)
-  const folderInputRef = useRef(null);
   const fileInputRef = useRef(null);
-
-  const openBackendFolder = () => {
-    setFolderPathDraft(localStorage.getItem('stackmate_verified_project_path') || '');
-    setFolderPathError('');
-    setFolderPathDialogOpen(true);
-  };
-
-  const submitBackendFolder = async (event) => {
-    event.preventDefault();
-    if (!folderPathDraft.trim()) return;
-    try {
-      const response = await fetch('http://localhost:3001/api/project-root', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: folderPathDraft.trim() }),
-      });
-      if (!response.ok) throw new Error('Klasör yolu bulunamadı veya erişilemiyor');
-      const { path: verifiedPath } = await response.json();
-      const tree = await apiReadDir(verifiedPath);
-      setCurrentDirHandle(null);
-      setCurrentDirPath(verifiedPath);
-      setFiles(tree);
-      localStorage.setItem('stackmate_verified_project_path', verifiedPath);
-      setFolderPathDialogOpen(false);
-    } catch (error) {
-      setFolderPathError('Klasör açılamadı: ' + error.message);
-    }
-  };
 
   const handleFileAction = async (action) => {
     switch (action) {
-      case 'open-folder': {
-        // Önce native API'yi dene (Chrome, Edge ve bazı Brave sürümleri)
-        if ('showDirectoryPicker' in window) {
-          try {
-            const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-            const structure = await readDirectory(dirHandle);
-            setFiles(structure);
-            setCurrentDirHandle(dirHandle);
-            try { await saveDirectoryHandle(dirHandle); }
-            catch (error) { console.warn('Klasör kalıcı olarak kaydedilemedi:', error.message); }
-
-            setCurrentDirPath(null);
-            const candidate = window.prompt('Terminal ve AI komutları için seçtiğiniz klasörün tam yolunu girin. İptal ederseniz dosya editörü çalışmaya devam eder.', localStorage.getItem('stackmate_verified_project_path') || '');
-            if (candidate?.trim()) {
-              try {
-                const response = await fetch('http://localhost:3001/api/project-root', {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: candidate.trim() }),
-                });
-                if (!response.ok) throw new Error('Yol doğrulanamadı');
-                const { path: verifiedPath } = await response.json();
-                if (verifiedPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() !== dirHandle.name) throw new Error('Seçilen klasörle yolun adı uyuşmuyor');
-                setCurrentDirPath(verifiedPath);
-                localStorage.setItem('stackmate_verified_project_path', verifiedPath);
-              } catch (error) { alert('Backend proje yolu kullanılamıyor: ' + error.message); }
-            }
-
-            break; // Başarılı — çık
-          } catch (err) {
-            if (err.name === 'AbortError') break; // Kullanıcı iptal etti
-            // API var ama çalışmıyor — fallback'e düş
-            console.warn('showDirectoryPicker başarısız, fallback kullanılıyor:', err.message);
-          }
-        }
-        // Gömülü tarayıcılar klasör input'undan dosya listesi sağlayamayabilir.
-        openBackendFolder();
+      case 'open-folder':
+        await pickFolder();
         break;
-      }
       case 'open-file': {
-        // Önce native API'yi dene
+        // Proje dışı tek dosya: tarayıcının dosya seçicisiyle açılır.
         if ('showOpenFilePicker' in window) {
           try {
             const [fh] = await window.showOpenFilePicker();
             const f = await fh.getFile();
-            const content = await f.text();
-            await openFileInTab({ name: f.name, content, handle: fh, external: true });
-            break; // Başarılı — çık
+            addOrActivateTab({ id: `external:${f.name}:${f.lastModified}`, path: null, relativePath: null, name: f.name, content: await f.text(), handle: fh, modified: false, external: true });
+            break;
           } catch (err) {
-            if (err.name === 'AbortError') break; // Kullanıcı iptal etti
+            if (err.name === 'AbortError') break;
             console.warn('showOpenFilePicker başarısız, fallback kullanılıyor:', err.message);
           }
         }
-        // Fallback: normal <input type="file">
         fileInputRef.current?.click();
         break;
       }
@@ -564,30 +368,16 @@ function App() {
           alert('Kaydedilecek açık dosya yok.');
           return;
         }
-        if (current.handle) {
-          // Native FS — doğrudan kaydet
-          try {
+        try {
+          if (current.handle) {
             const writable = await current.handle.createWritable();
             await writable.write(current.content || '');
             await writable.close();
-            handleSave(current.content || '');
-          } catch (err) {
-            alert('Kaydetme hatası: ' + err.message);
-          }
-        } else if (currentDirPath) {
-          // Backend API — sunucu üzerinden proje klasörüne kaydet
-          try {
-            const filePath = currentDirPath + '\\' + (current.path ? current.path.split('/').slice(1).join('\\') : current.name);
-            await apiSaveFile(filePath, current.content || '');
-            handleSave(current.content || '');
-          } catch (err) {
-            alert('Kaydetme hatası: ' + err.message);
-          }
-        } else {
-          // Fallback: dosyayı indir
-          try {
-            const blob = new Blob([current.content || ''], { type: 'text/plain' });
-            const url = URL.createObjectURL(blob);
+          } else if (current.relativePath && project) {
+            await apiSaveFile(joinProjectPath(project.path, current.relativePath), current.content || '');
+          } else {
+            // Proje dışı ve yazma izni olmayan dosya: indir.
+            const url = URL.createObjectURL(new Blob([current.content || ''], { type: 'text/plain' }));
             const a = document.createElement('a');
             a.href = url;
             a.download = current.name || 'untitled.txt';
@@ -595,109 +385,32 @@ function App() {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-            handleSave(current.content || '');
-          } catch (err) {
-            alert('İndirme hatası: ' + err.message);
           }
+          handleSave(current.content || '', current.id);
+        } catch (err) {
+          alert('Kaydetme hatası: ' + err.message);
         }
         break;
       }
-      case 'new-file': {
-        const fileName = prompt('Dosya adını girin:', 'yeni-dosya.txt');
-        if (!fileName || !fileName.trim()) break;
-        const trimmedName = fileName.trim();
-
-        if (currentDirHandle) {
-          // Native FS — proje klasörüne gerçek dosya oluştur
-          try {
-            const fileHandle = await currentDirHandle.getFileHandle(trimmedName, { create: true });
-            const writable = await fileHandle.createWritable();
-            await writable.write('');
-            await writable.close();
-            await refreshExplorer();
-            await openFileInTab({ name: trimmedName, content: '', handle: fileHandle });
-          } catch (err) {
-            alert('Dosya oluşturulamadı: ' + err.message);
-          }
-        } else if (currentDirPath) {
-          // Backend API — sunucu üzerinden dosya oluştur
-          try {
-            const filePath = currentDirPath + '\\' + trimmedName;
-            await apiSaveFile(filePath, '');
-            await refreshExplorer();
-            await openFileInTab({ name: trimmedName, content: '', handle: null });
-          } catch (err) {
-            alert('Dosya oluşturulamadı: ' + err.message);
-          }
+      case 'new-file':
+        if (project) {
+          setShowExplorer(true);
+          explorerRef.current?.newFile();
         } else {
-          // Hiç klasör açılmamış — basit tab aç
-          const newTab = { id: trimmedName, name: trimmedName, content: '', handle: null, modified: false };
-          const newTabs = [...openTabs, newTab];
-          setOpenTabs(newTabs);
-          setActiveTab(trimmedName);
-          await saveActiveTab(trimmedName);
+          const name = `Adsız-${openTabs.length + 1}.txt`;
+          addOrActivateTab({ id: `untitled:${Date.now()}`, path: null, relativePath: null, name, content: '', modified: false });
         }
         break;
-      }
       default:
         break;
     }
   };
 
-  // Fallback: klasör input değişikliği
-  const handleFolderInputChange = async (e) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
-    const fileArray = Array.from(fileList);
-    const tree = buildTreeFromFileList(fileArray);
-    setFiles(tree);
-    setCurrentDirHandle(null);
-    setCurrentDirPath(null);
-
-    // Dosya yolundan proje klasör yolunu çıkar (Backend API için)
-    // webkitRelativePath: "SmartRamManager/dosya.txt" gibi
-    // Gerçek tam yolu bulmak için backend'e sorabiliriz
-    // Ama güvenlik nedeniyle tarayıcı tam yolu vermez.
-    // Kullanıcıya proje yolunu soralım (bir kere)
-    const rootName = fileArray[0]?.webkitRelativePath?.split('/')[0];
-    if (rootName) {
-      // En basit yaklaşım: kullanıcıya sor
-      const savedPath = localStorage.getItem('stackmate_verified_project_path');
-        if (savedPath && savedPath.endsWith(rootName)) {
-          const response = await fetch('http://localhost:3001/api/project-root', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: savedPath }) });
-          if (response.ok) setCurrentDirPath((await response.json()).path);
-      } else {
-        const userPath = prompt(
-          `Proje klasörünün tam yolunu girin (sessiz kaydetme için):\nÖrnek: C:\\Users\\kullanici\\Desktop\\proje\\${rootName}`,
-          ''
-        );
-        if (userPath && userPath.trim()) {
-          if (userPath.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() !== rootName) {
-            alert('Girilen yolun klasör adı seçilen klasörle uyuşmuyor.');
-            return;
-          }
-          const response = await fetch('http://localhost:3001/api/project-root', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: userPath.trim() }) });
-          if (response.ok) {
-            const { path: verifiedPath } = await response.json();
-            setCurrentDirPath(verifiedPath);
-            localStorage.setItem('stackmate_verified_project_path', verifiedPath);
-          } else alert('Proje yolu doğrulanamadı.');
-        }
-      }
-    }
-
-    // Input'u sıfırla (aynı klasör tekrar seçilebilsin)
-    e.target.value = '';
-  };
-
   // Fallback: dosya input değişikliği
   const handleFileInputChange = async (e) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
-    const file = fileList[0];
-    const content = await file.text();
-    await openFileInTab({ name: file.name, content, handle: null, _file: file });
-    // Input'u sıfırla
+    const file = e.target.files?.[0];
+    if (!file) return;
+    addOrActivateTab({ id: `external:${file.name}:${file.lastModified}`, path: null, relativePath: null, name: file.name, content: await file.text(), handle: null, modified: false, external: true });
     e.target.value = '';
   };
 
@@ -712,30 +425,8 @@ function App() {
     if (!editor) return;
     try {
       editor.getAction(actionId)?.run();
-    } catch (_) { }
+    } catch { /* eylem bu dilde yok */ }
   }, []);
-
-  const handleNewFolderInExplorer = useCallback(async () => {
-    const folderName = prompt('Klasör adını girin:', 'yeni-klasör');
-    if (!folderName || !folderName.trim()) return;
-    const trimmed = folderName.trim();
-
-    if (currentDirHandle) {
-      try {
-        await currentDirHandle.getDirectoryHandle(trimmed, { create: true });
-        await refreshExplorer();
-      } catch (err) {
-        alert('Klasör oluşturulamadı: ' + err.message);
-      }
-    } else if (currentDirPath) {
-      try {
-        await apiMkdir(currentDirPath + '\\' + trimmed);
-        await refreshExplorer();
-      } catch (err) {
-        alert('Klasör oluşturulamadı: ' + err.message);
-      }
-    }
-  }, [currentDirHandle, currentDirPath, refreshExplorer]);
 
   const handleViewAction = async (action) => {
     switch (action) {
@@ -771,9 +462,8 @@ function App() {
       case 'copy-line-down': triggerEditorAction('editor.action.copyLinesDownAction'); break;
       // ─── Ekran / Görünüm ────────────────────────────────────────────────
       case 'fullscreen':
-        document.fullscreenElement
-          ? document.exitFullscreen()
-          : document.documentElement.requestFullscreen();
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen();
         break;
       case 'zoom-in': {
         const cur = parseFloat(getComputedStyle(document.documentElement).fontSize);
@@ -795,7 +485,9 @@ function App() {
         break;
       // ─── Dosya / Explorer ─────────────────────────────────────────────
       case 'new-file-in-explorer': handleFileAction('new-file'); break;
-      case 'new-folder-in-explorer': handleNewFolderInExplorer(); break;
+      case 'new-folder-in-explorer':
+        if (project) { setShowExplorer(true); explorerRef.current?.newFolder(); }
+        break;
       case 'quick-open': handleFileAction('open-file'); break;
       default: break;
     }
@@ -807,7 +499,7 @@ function App() {
       <Navbar
         onFileAction={handleFileAction}
         onViewAction={handleViewAction}
-        projectName={files?.name || null}
+        projectName={project?.name || null}
         showExplorer={showExplorer}
         showTerminal={showTerminal}
         showAI={showAI}
@@ -817,33 +509,27 @@ function App() {
 
       {settingsOpen && <SettingsPanel settings={settings} onSave={saveSettings} onClose={() => setSettingsOpen(false)} />}
 
-      {/* Gizli fallback input'lar — tüm tarayıcılar için */}
-      <input
-        ref={folderInputRef}
-        type="file"
-        webkitdirectory="true"
-        directory="true"
-        multiple
-        style={{ display: 'none' }}
-        onChange={handleFolderInputChange}
-      />
-      <input
-        ref={fileInputRef}
-        type="file"
-        style={{ display: 'none' }}
-        onChange={handleFileInputChange}
-      />
+      <input ref={fileInputRef} type="file" style={{ display: 'none' }} onChange={handleFileInputChange} />
 
-      {folderPathDialogOpen && (
-        <div className="folder-path-overlay" role="presentation">
-          <form className="folder-path-dialog" onSubmit={submitBackendFolder} role="dialog" aria-modal="true" aria-labelledby="folder-path-title">
+      {folderDialog && (
+        <div className="folder-path-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setFolderDialog(null); }}>
+          <form className="folder-path-dialog" onSubmit={submitFolderDialog} role="dialog" aria-modal="true" aria-labelledby="folder-path-title">
             <h2 id="folder-path-title">Proje klasörünü aç</h2>
-            <p>Dosya gezgininde göstermek istediğiniz klasörün tam yolunu girin.</p>
-            <input autoFocus aria-label="Klasör yolu" value={folderPathDraft} onChange={event => setFolderPathDraft(event.target.value)} placeholder="C:\\Users\\kullanici\\Proje" />
-            {folderPathError && <p className="folder-path-error" role="alert">{folderPathError}</p>}
+            <p>Klasörün tam yolunu girin. {platform === 'win32'
+              ? 'Dosya Gezgini\'nde klasöre Shift + sağ tıklayıp "Yol olarak kopyala" seçeneğini kullanabilirsiniz.'
+              : 'Finder\'da klasöre sağ tıklayıp Option tuşuna basılı tutarak yolunu kopyalayabilirsiniz.'}</p>
+            <input
+              autoFocus
+              aria-label="Klasör yolu"
+              value={folderDialog.draft}
+              onChange={event => setFolderDialog(dialog => ({ ...dialog, draft: event.target.value, error: '' }))}
+              placeholder={platform === 'win32' ? 'C:\\Users\\kullanici\\Proje' : '/Users/kullanici/Proje'}
+              spellCheck={false}
+            />
+            {folderDialog.error && <p className="folder-path-error" role="alert">{folderDialog.error}</p>}
             <div className="folder-path-actions">
-              <button type="button" onClick={() => setFolderPathDialogOpen(false)}>İptal</button>
-              <button type="submit" disabled={!folderPathDraft.trim()}>Klasörü Aç</button>
+              <button type="button" onClick={() => setFolderDialog(null)}>İptal</button>
+              <button type="submit" disabled={!folderDialog.draft.trim()}>Klasörü Aç</button>
             </div>
           </form>
         </div>
@@ -855,19 +541,24 @@ function App() {
             {showExplorer && (
               <>
                 <div
-                  ref={explorerRef}
+                  ref={explorerPanelRef}
                   className="file-explorer"
                   style={{ width: explorerWidth ? `${explorerWidth}px` : undefined }}
                 >
                   <FileExplorer
-                    onFileSelect={openFileInTab}
-                    customFiles={files}
-                    onRefresh={refreshExplorer}
-                    onRename={handleRename}
-                    onDelete={handleDelete}
-                    onNewFile={() => handleFileAction('new-file')}
-                    onNewFolder={handleNewFolderInExplorer}
-                    currentDirPath={currentDirPath}
+                    key={project?.path || 'no-project'}
+                    ref={explorerRef}
+                    rootPath={project?.path || null}
+                    projectName={project?.name || ''}
+                    platform={platform}
+                    activeRelativePath={activeFile?.relativePath || null}
+                    recentProjects={recentProjects}
+                    backendOnline={backendOnline}
+                    onOpenFile={openProjectFile}
+                    onEntryRenamed={handleEntryRenamed}
+                    onEntryDeleted={handleEntryDeleted}
+                    onPickFolder={pickFolder}
+                    onOpenRecent={openRecent}
                   />
                 </div>
                 <ResizeHandle
@@ -890,7 +581,7 @@ function App() {
                   file={activeFile}
                   onSave={handleSave}
                   onContentChange={handleContentChange}
-                  currentDirPath={currentDirPath}
+                  currentDirPath={project?.path || null}
                   onCursorChange={setCursorPos}
                   onEditorMount={handleEditorMount}
                   editorSettings={settings?.editor}
@@ -911,12 +602,10 @@ function App() {
                   style={{ width: aiWidth ? `${aiWidth}px` : undefined }}
                 >
                   <AIPanel
-                    currentDirPath={currentDirPath}
-                    currentDirHandle={currentDirHandle}
-                    projectName={files?.name}
-                    openTabs={openTabs}
-                    activeTab={activeTab}
+                    currentDirPath={project?.path || null}
+                    currentDirHandle={null}
                     onFileChange={refreshExplorer}
+                    onOpenFile={openProjectFile}
                   />
                 </div>
               </>
@@ -937,8 +626,9 @@ function App() {
               >
                 <ErrorBoundary label="Terminal hatası">
                   <Terminal
+                    key={project?.path || 'no-project'}
                     onClose={() => { setShowTerminal(false); saveTerminalState(false); }}
-                    workingDirectory={currentDirHandle?.name || null}
+                    workingDirectory={project?.path || null}
                   />
                 </ErrorBoundary>
               </div>
@@ -949,7 +639,7 @@ function App() {
 
       <StatusBar
         activeFile={activeFile}
-        gitBranch={files?.name ? 'main' : 'main'}
+        gitBranch="main"
         cursorPos={cursorPos}
       />
     </div>

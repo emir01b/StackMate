@@ -1,103 +1,38 @@
-// Backend dosya sistemi API'leri (Brave/Firefox için)
+// Backend dosya sistemi API'leri: tüm proje işlemleri yerel backend üzerinden yapılır.
 const API_BASE = 'http://localhost:3001/api';
 
-/**
- * Backend üzerinden dizin yapısını oku
- * @param {string} dirPath - Sunucudaki dizin yolu
- * @param {boolean} deep - Tüm alt dizinleri de oku
- */
-export const apiReadDir = async (dirPath, deep = false) => {
-    const res = await fetch(`${API_BASE}/read-dir`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: dirPath, deep }),
+const post = async (route, body, fallbackError) => {
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/${route}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
     });
-    if (!res.ok) throw new Error((await res.json()).error || 'Dizin okunamadı');
-    return res.json();
+  } catch {
+    throw new Error('Backend\'e ulaşılamadı. "npm run dev:all" ile sunucuyu başlatın.');
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(data.error || fallbackError), { status: response.status, data });
+  return data;
 };
 
-/**
- * Backend üzerinden dosya kaydet
- * @param {string} filePath - Dosyanın tam yolu
- * @param {string} content - Dosya içeriği
- */
-export const apiSaveFile = async (filePath, content) => {
-    const res = await fetch(`${API_BASE}/save-file`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: filePath, content }),
-    });
-    if (!res.ok) throw new Error((await res.json()).error || 'Kaydetme hatası');
-    return res.json();
-};
+/** Klasörü proje kökü olarak doğrular; gerçek (realpath) yolu döner. */
+export const apiOpenProject = (dirPath) => post('project-root', { path: dirPath }, 'Klasör açılamadı');
 
-/**
- * Backend üzerinden dosya oku
- * @param {string} filePath - Dosyanın tam yolu
- */
-export const apiReadFile = async (filePath) => {
-    const res = await fetch(`${API_BASE}/read-file`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: filePath }),
-    });
-    if (!res.ok) throw new Error((await res.json()).error || 'Dosya okunamadı');
-    return res.json();
-};
+/** İşletim sisteminin klasör seçicisini açar: { path } veya { cancelled: true }. */
+export const apiPickFolder = (startPath) => post('pick-folder', { startPath }, 'Klasör seçici açılamadı');
 
-/**
- * Backend üzerinden alt dizin oku (lazy load)
- * @param {string} dirPath - Alt dizin yolu
- */
-export const apiReadSubdir = async (dirPath) => {
-    const res = await fetch(`${API_BASE}/read-subdir`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: dirPath }),
-    });
-    if (!res.ok) throw new Error((await res.json()).error || 'Dizin okunamadı');
-    return res.json();
-};
+export const apiReadDir = (dirPath, deep = false) => post('read-dir', { path: dirPath, deep }, 'Dizin okunamadı');
+export const apiReadSubdir = (dirPath) => post('read-subdir', { path: dirPath }, 'Klasör okunamadı');
+export const apiReadFile = (filePath) => post('read-file', { path: filePath }, 'Dosya okunamadı');
+export const apiSaveFile = (filePath, content) => post('save-file', { path: filePath, content }, 'Kaydetme hatası');
 
-/**
- * Backend üzerinden dosya/klasör yeniden adlandır
- * @param {string} oldPath - Mevcut tam yol
- * @param {string} newPath - Yeni tam yol
- */
-export const apiRename = async (oldPath, newPath) => {
-    const res = await fetch(`${API_BASE}/rename`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oldPath, newPath }),
-    });
-    if (!res.ok) throw new Error((await res.json()).error || 'Adlandırma hatası');
-    return res.json();
-};
+/** Yalnızca yeni dosya oluşturur; aynı adda dosya varsa hata verir (üzerine yazmaz). */
+export const apiCreateFile = (filePath, content = '') => post('create-file', { path: filePath, content }, 'Dosya oluşturulamadı');
+export const apiMkdir = (dirPath, { exclusive = false } = {}) => post('mkdir', { path: dirPath, exclusive }, 'Klasör oluşturulamadı');
+export const apiRename = (oldPath, newPath) => post('rename', { oldPath, newPath }, 'Yeniden adlandırılamadı');
 
-/**
- * Backend üzerinden dosya/klasör sil
- * @param {string} filePath - Silinecek dosya/klasör yolu
- */
-export const apiDelete = async (filePath) => {
-    const res = await fetch(`${API_BASE}/delete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: filePath }),
-    });
-    if (!res.ok) throw new Error((await res.json()).error || 'Silme hatası');
-    return res.json();
-};
-
-/**
- * Backend üzerinden klasör oluştur
- * @param {string} dirPath - Oluşturulacak dizin yolu
- */
-export const apiMkdir = async (dirPath) => {
-    const res = await fetch(`${API_BASE}/mkdir`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: dirPath }),
-    });
-    if (!res.ok) throw new Error((await res.json()).error || 'Klasör oluşturma hatası');
-    return res.json();
-};
+/** Varsayılan olarak çöp kutusuna taşır; permanent: true kalıcı siler. */
+export const apiDelete = (targetPath, { permanent = false } = {}) => post('delete', { path: targetPath, permanent }, 'Silinemedi');
+export const apiReveal = (targetPath) => post('reveal', { path: targetPath }, 'Dosya yöneticisinde gösterilemedi');
