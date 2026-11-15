@@ -155,22 +155,25 @@ async function main() {
     assert.equal(socketUrl.searchParams.get('token'), token);
     await page.locator('.terminal-panel .xterm').waitFor({ timeout: 10000 });
 
-    const disconnect = page.evaluate(() => new Promise(resolve => {
-      const unsubscribe = window.stackmate.onConnectionChanged(connection => {
-        if (connection === null) {
-          unsubscribe();
-          resolve();
-        }
+    await page.evaluate(() => {
+      window.smokeBackendDisconnected = new Promise(resolve => {
+        const unsubscribe = window.stackmate.onConnectionChanged(connection => {
+          if (connection === null) {
+            unsubscribe();
+            resolve();
+          }
+        });
       });
-    }));
+    });
     const backendPid = await desktop.evaluate(({ app }) => (
       app.getAppMetrics().find(metric => metric.name === 'StackMate Terminal')?.pid
     ));
     assert.ok(backendPid, 'Electron utility backend is running');
-    process.kill(backendPid);
+    // Simulate a crash on every platform, bypassing the backend's SIGTERM handler.
+    process.kill(backendPid, 'SIGKILL');
     let disconnectTimer;
     try {
-      await Promise.race([disconnect, new Promise((_, reject) => {
+      await Promise.race([page.evaluate(() => window.smokeBackendDisconnected), new Promise((_, reject) => {
         disconnectTimer = setTimeout(() => reject(new Error('Backend disconnect was not announced')), 10000);
       })]);
     } finally {
