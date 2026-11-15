@@ -1,14 +1,26 @@
-const { WebSocketServer } = require('ws');
+const { WebSocket, WebSocketServer } = require('ws');
 const { createServer } = require('http');
 const { spawn, execFile } = require('child_process');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { randomUUID } = require('crypto');
+const { randomUUID, timingSafeEqual } = require('crypto');
 const { readSettings, publicSettings, updateSettings, activeConnection, endpointUrl } = require('./settings-store.cjs');
 
-const PORT = Number(process.env.STACKMATE_PORT || 3001);
-const ALLOWED_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
+const parentPort = process.parentPort;
+const PORT = parentPort ? 0 : Number(process.env.STACKMATE_PORT || 3001);
+const allowedOrigins = new Set(parentPort ? [] : ['http://localhost:5173', 'http://127.0.0.1:5173']);
+let desktopToken;
+let shuttingDown = false;
+const folderRequests = new Map();
+const commandProcesses = new Set();
+
+const validToken = (token) => {
+  if (!desktopToken || typeof token !== 'string') return false;
+  const received = Buffer.from(token);
+  return received.length === desktopToken.length && timingSafeEqual(received, desktopToken);
+};
+const requestUrl = (req) => new URL(req.url, 'http://127.0.0.1');
 let projectRoot = null;
 let folderPickerOpen = false;
 let appSettings = readSettings();
@@ -71,12 +83,12 @@ for (const filename of fs.readdirSync(stageStoreDir)) {
   } catch { /* geçersiz kayıtları yok say */ }
 }
 let agentProcCounter = 1;
-const killAgentProcess = (proc) => {
-  if (!proc?.pid) return;
+const killCommandProcess = async (proc, signal = 'SIGTERM') => {
+  if (!proc?.pid || !commandProcesses.has(proc)) return;
   if (PLATFORM === 'win32') {
-    spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true });
+    await runFile('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { timeout: 2000 }).catch(() => {});
   } else {
-    proc.kill('SIGTERM');
+    try { process.kill(-proc.pid, signal); } catch { /* Process group already exited. */ }
   }
 };
 
@@ -99,6 +111,13 @@ const appleScriptString = (value) => `"${String(value).replace(/\\/g, '\\\\').re
 // İşletim sisteminin kendi klasör seçicisini açar; iptalde null döner.
 const pickFolder = async (startPath) => {
   const start = startPath && fs.existsSync(startPath) ? startPath : HOME;
+  if (parentPort) {
+    return new Promise((resolve, reject) => {
+      const id = randomUUID();
+      folderRequests.set(id, { resolve, reject });
+      parentPort.postMessage({ type: 'pick-folder', id, startPath: start });
+    });
+  }
   if (PLATFORM === 'darwin') {
     try {
       const output = await runFile('osascript', [
@@ -200,20 +219,28 @@ const HIDDEN_ENTRIES = new Set(['.git', '.DS_Store', 'Thumbs.db', 'desktop.ini',
 const naturalCompare = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 
 // Komutu platforma göre çalıştır
-const spawnCommand = (cmd, cwd) => {
-  if (PLATFORM === 'win32') {
-    return spawn(SHELL, ['/c', cmd], {
-      cwd,
-      env: { ...process.env, FORCE_COLOR: '1' },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: false,
-    });
-  }
-  return spawn(SHELL, ['-c', cmd], {
-    cwd,
-    env: { ...process.env, TERM: 'xterm-256color', FORCE_COLOR: '1' },
-    stdio: ['pipe', 'pipe', 'pipe'],
+const trackCommand = (proc, startedAfter) => {
+  commandProcesses.add(proc);
+  if (proc.pid) parentPort?.postMessage({ type: 'command-started', pid: proc.pid, startedAfter, startedBefore: Date.now() });
+  proc.once('close', () => {
+    commandProcesses.delete(proc);
+    if (proc.pid) parentPort?.postMessage({ type: 'command-ended', pid: proc.pid });
   });
+  return proc;
+};
+
+const spawnCommand = (cmd, cwd) => {
+  const windows = PLATFORM === 'win32';
+  const args = windows ? ['/d', '/s', '/c', `"${cmd}"`] : ['-c', cmd];
+  const startedAfter = Date.now();
+  return trackCommand(spawn(SHELL, args, {
+    cwd,
+    env: { ...process.env, ...(windows ? {} : { TERM: 'xterm-256color' }), FORCE_COLOR: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    detached: !windows,
+    windowsHide: true,
+    windowsVerbatimArguments: windows,
+  }), startedAfter);
 };
 
 // ANSI renk kodları
@@ -311,15 +338,28 @@ const listDirForAgent = (dirPath, { maxDepth = 3, maxEntries = 400 } = {}) => {
 const server = createServer(async (req, res) => {
   // CORS
   const origin = req.headers.origin;
-  if (origin && !ALLOWED_ORIGINS.has(origin)) { res.writeHead(403); res.end(); return; }
+  if (origin && !allowedOrigins.has(origin)) { res.writeHead(403); res.end(); return; }
   if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (shuttingDown) { res.writeHead(503); res.end(); return; }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
     res.end();
     return;
+  }
+
+  if (parentPort) {
+    let url;
+    try { url = requestUrl(req); } catch { res.writeHead(400); res.end(); return; }
+    const bearer = req.headers.authorization?.match(/^Bearer (\S+)$/i)?.[1];
+    const sse = req.method === 'GET' && url.pathname === '/api/fs-watch';
+    if (!validToken(bearer ?? (sse ? url.searchParams.get('token') : null))) {
+      res.writeHead(401); res.end(); return;
+    }
+    res.setHeader('Cache-Control', 'no-store');
   }
 
   if (req.method === 'POST' && req.url === '/api/project-root') {
@@ -709,8 +749,8 @@ const server = createServer(async (req, res) => {
   }
 
   // ─── API: Dosya İzleme (SSE) ──────────────────────────────────────────
-  if (req.method === 'GET' && req.url.startsWith('/api/fs-watch')) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+  if (req.method === 'GET' && req.url.split('?', 1)[0] === '/api/fs-watch') {
+    const url = requestUrl(req);
     const watchPath = url.searchParams.get('path');
     if (!withinProject(watchPath) || !fs.existsSync(watchPath)) {
       res.writeHead(400); res.end(); return;
@@ -997,24 +1037,45 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'command gerekli' }));
       return;
     }
-    const { exec } = require('child_process');
-    const options = {
+    if (shuttingDown) return;
+    const startedAfter = Date.now();
+    const proc = trackCommand(spawn(command, {
       cwd: execCwd || process.cwd(),
-      timeout: 60000,
-      maxBuffer: 1024 * 1024,
       shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash',
+      detached: PLATFORM !== 'win32',
+      windowsHide: true,
+    }), startedAfter);
+    let stdout = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let interrupted = false;
+    const interrupt = () => {
+      if (interrupted) return;
+      interrupted = true;
+      void killCommandProcess(proc, 'SIGKILL');
     };
-    exec(command, options, (error, stdout, stderr) => {
-      let exitCode = 0;
-      if (error) {
-        exitCode = typeof error.code === 'number' ? error.code : 1;
-        if (error.killed) stderr = (stderr || '') + '\n[Komut zaman aşımına uğradı]';
-      }
+    const timeout = setTimeout(interrupt, 60000);
+    const appendOutput = (text, chunk) => (text + chunk).slice(-10000);
+    proc.stdout.setEncoding('utf8').on('data', chunk => {
+      stdoutBytes += Buffer.byteLength(chunk);
+      stdout = appendOutput(stdout, chunk);
+      if (stdoutBytes > 1024 * 1024) interrupt();
+    });
+    proc.stderr.setEncoding('utf8').on('data', chunk => {
+      stderrBytes += Buffer.byteLength(chunk);
+      stderr = appendOutput(stderr, chunk);
+      if (stderrBytes > 1024 * 1024) interrupt();
+    });
+    proc.on('error', error => { stderr = appendOutput(stderr, error.message); });
+    proc.on('close', code => {
+      clearTimeout(timeout);
+      if (interrupted) stderr += '\n[Komut zaman aşımına uğradı]';
       res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173' });
       res.end(JSON.stringify({
-        exitCode,
-        stdout: (stdout || '').slice(-10000),
-        stderr: (stderr || '').slice(-5000),
+        exitCode: code ?? 1,
+        stdout,
+        stderr: stderr.slice(-5000),
       }));
     });
     return;
@@ -1047,6 +1108,7 @@ const server = createServer(async (req, res) => {
     let running = true;
     let wasKilled = false;
 
+    if (shuttingDown) return;
     const proc = spawnCommand(command, execCwd);
 
     proc.stdout.on('data', (d) => { stdout = (stdout + d.toString()).slice(-10000); });
@@ -1100,7 +1162,7 @@ const server = createServer(async (req, res) => {
     const p = agentProcesses.get(procId);
     if (p) {
       p.markKilled();
-      try { killAgentProcess(p.proc); } catch (_) { }
+      void killCommandProcess(p.proc);
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': req.headers.origin || 'http://localhost:5173' });
     res.end(JSON.stringify({ ok: true }));
@@ -1109,7 +1171,15 @@ const server = createServer(async (req, res) => {
 
   res.end('Terminal OK');
 });
-const wss = new WebSocketServer({ server, verifyClient: ({ req }) => ALLOWED_ORIGINS.has(req.headers.origin) });
+const wss = new WebSocketServer({
+  server,
+  verifyClient: ({ req }) => {
+    if (!allowedOrigins.has(req.headers.origin)) return false;
+    if (!parentPort) return true;
+    try { return validToken(requestUrl(req).searchParams.get('token')); }
+    catch { return false; }
+  },
+});
 
 // ─── Her bağlantı için ayrı state ──────────────────────────────────────────
 wss.on('connection', (ws) => {
@@ -1178,16 +1248,19 @@ wss.on('connection', (ws) => {
     }
 
     // Komutu çalıştır
-    activeProc = spawnCommand(cmd, cwd);
-
-    activeProc.stdout.on('data', (d) => ws.send(d.toString()));
-    activeProc.stderr.on('data', (d) => ws.send(d.toString()));
-    activeProc.on('close', () => { activeProc = null; sendPrompt(); });
-    activeProc.on('error', (e) => {
-      ws.send(`\r\n${c.red}Hata: ${e.message}${c.reset}\r\n`);
+    const proc = spawnCommand(cmd, cwd);
+    activeProc = proc;
+    const sendOutput = (chunk) => {
+      if (activeProc === proc && ws.readyState === WebSocket.OPEN) ws.send(chunk.toString());
+    };
+    proc.stdout.on('data', sendOutput);
+    proc.stderr.on('data', sendOutput);
+    proc.on('close', () => {
+      if (activeProc !== proc) return;
       activeProc = null;
-      sendPrompt();
+      if (ws.readyState === WebSocket.OPEN) sendPrompt();
     });
+    proc.on('error', error => sendOutput(`\r\n${c.red}Hata: ${error.message}${c.reset}\r\n`));
   };
 
   // ─── Tab tamamlama ─────────────────────────────────────────────────────
@@ -1240,6 +1313,7 @@ wss.on('connection', (ws) => {
 
   // ─── Giriş işleme ──────────────────────────────────────────────────────
   ws.on('message', (msg) => {
+    if (shuttingDown) return;
     const raw = msg.toString();
 
     // JSON mesajları (chdir / resize)
@@ -1272,7 +1346,7 @@ wss.on('connection', (ws) => {
     // ─── Aktif interaktif process (python, node vb.) ────────────────────
     if (activeProc) {
       if (raw === '\x03') { // Ctrl+C
-        try { activeProc.kill('SIGINT'); } catch (_) { }
+        void killCommandProcess(activeProc, 'SIGINT');
         ws.send('^C\r\n');
         activeProc = null;
         sendPrompt();
@@ -1371,7 +1445,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    activeProc?.kill('SIGTERM');
+    if (!shuttingDown) void killCommandProcess(activeProc);
   });
 
   ws.on('error', (e) => console.error('[terminal] WS hatası:', e.message));
@@ -1380,25 +1454,53 @@ wss.on('connection', (ws) => {
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
     console.error(`Port ${PORT} kullanımda. Başka bir terminal-server.cjs çalışıyor olabilir.`);
-    console.error(`Kapatmak için: lsof -ti:${PORT} | xargs kill -9`);
     process.exit(1);
   }
   throw e;
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Terminal backend: http://localhost:${PORT}`);
+const listen = () => server.listen(PORT, '127.0.0.1', () => {
+  const { port } = server.address();
+  parentPort?.postMessage({ type: 'ready', port });
+  console.log(`Terminal backend: http://127.0.0.1:${port}`);
   console.log(`Platform: ${PLATFORM} | Shell: ${SHELL}`);
   console.log('WebSocket hazır');
 });
 
-const shutdown = () => {
-  for (const entry of agentProcesses.values()) {
-    if (entry.isRunning()) killAgentProcess(entry.proc);
-  }
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const active = [...commandProcesses];
+  server.close();
+  server.closeAllConnections();
   wss.clients.forEach(client => client.terminate());
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 2000).unref();
+  await Promise.all(active.map(proc => killCommandProcess(proc)));
+  if (PLATFORM !== 'win32' && active.length) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    for (const proc of active) {
+      try { process.kill(-proc.pid, 'SIGKILL'); } catch { /* Process group has exited. */ }
+    }
+  }
+  process.exit(0);
 };
+if (parentPort) {
+  parentPort.on('message', ({ data }) => {
+    if (data.type === 'init' && !desktopToken && !shuttingDown) {
+      desktopToken = Buffer.from(data.token);
+      allowedOrigins.add(data.origin);
+      listen();
+    } else if (data.type === 'shutdown') {
+      void shutdown();
+    } else if (data.type === 'folder-result') {
+      const pending = folderRequests.get(data.id);
+      if (!pending) return;
+      folderRequests.delete(data.id);
+      if (data.error) pending.reject(new Error(data.error));
+      else pending.resolve(data.path);
+    }
+  });
+} else {
+  listen();
+}
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);

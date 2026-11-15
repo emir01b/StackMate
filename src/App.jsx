@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import Navbar from './components/Navbar';
 import StatusBar from './components/StatusBar';
 import FileExplorer from './components/FileExplorer';
@@ -11,6 +11,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import ResizeHandle from './components/ResizeHandle';
 import { saveTerminalState, loadTerminalState, savePanelSizes, loadPanelSizes } from './utils/storage';
 import { apiOpenProject, apiPickFolder, apiReadFile, apiSaveFile } from './utils/fileApi';
+import { apiFetch, streamUrl } from './utils/backend';
 import { joinProjectPath } from './utils/paths';
 import './App.css';
 
@@ -39,10 +40,9 @@ const makeProjectTab = (projectName, relativePath, data) => ({
 
 const isInside = (relativePath, folder) => relativePath === folder || relativePath.startsWith(`${folder}/`);
 
-function App() {
+function App({ connection, activeProjectPathRef }) {
   const [project, setProject] = useState(null); // { path, name } — gerçek (realpath) yol
   const [recentProjects, setRecentProjects] = useState(() => readJson(RECENT_PROJECTS_KEY, []));
-  const [backendOnline, setBackendOnline] = useState(true);
   const [platform, setPlatform] = useState('');
   const [folderDialog, setFolderDialog] = useState(null); // { draft, error }
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -52,17 +52,18 @@ function App() {
   useEffect(() => { projectRef.current = project; }, [project]);
 
   useEffect(() => {
-    const refresh = () => fetch('http://localhost:3001/api/settings')
+    if (!connection) return;
+    const refresh = () => apiFetch('/api/settings')
       .then(response => response.ok ? response.json() : Promise.reject(new Error('Ayarlar alınamadı')))
       .then(setSettings)
       .catch(error => console.warn(error.message));
     refresh();
     window.addEventListener('stackmate-settings-changed', refresh);
     return () => window.removeEventListener('stackmate-settings-changed', refresh);
-  }, []);
+  }, [connection]);
 
   const saveSettings = useCallback(async (nextSettings) => {
-    const response = await fetch('http://localhost:3001/api/settings', {
+    const response = await apiFetch('/api/settings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(nextSettings),
     });
     const data = await response.json();
@@ -77,6 +78,10 @@ function App() {
   const [activeTab, setActiveTab] = useState(null);
   const openTabsRef = useRef(openTabs);
   useEffect(() => { openTabsRef.current = openTabs; }, [openTabs]);
+  const hasUnsavedChanges = openTabs.some(tab => tab.modified);
+  useLayoutEffect(() => {
+    window.stackmate.setDirty(hasUnsavedChanges);
+  }, [hasUnsavedChanges]);
 
   const [showExplorer, setShowExplorer] = useState(true);
   const [showAI, setShowAI] = useState(true);
@@ -101,6 +106,7 @@ function App() {
       && !window.confirm('Kaydedilmemiş değişiklikler var. Yine de başka bir klasör açılsın mı?')) return false;
     const { path: root, name } = await apiOpenProject(dirPath);
     const projectName = name || root;
+    activeProjectPathRef.current = root;
     setProject({ path: root, name: projectName });
     localStorage.setItem(LAST_PROJECT_KEY, root);
     setRecentProjects(prev => {
@@ -118,7 +124,7 @@ function App() {
     setOpenTabs(tabs);
     setActiveTab(tabs.find(tab => tab.relativePath === saved.active)?.id || tabs[0]?.id || null);
     return true;
-  }, []);
+  }, [activeProjectPathRef]);
 
   const showFolderDialog = useCallback((error = '') => {
     setFolderDialog({ draft: projectRef.current?.path || localStorage.getItem(LAST_PROJECT_KEY) || '', error });
@@ -158,7 +164,7 @@ function App() {
     }
   };
 
-  // ─── BAŞLANGIÇ: Backend'i bekle, son projeyi ve panel durumunu geri yükle ──
+  // Son projeyi ve panel durumunu açılışta geri yükle.
   useEffect(() => {
     setShowTerminal(loadTerminalState());
     const savedSizes = loadPanelSizes();
@@ -168,26 +174,19 @@ function App() {
       if (savedSizes.terminalHeight) setTerminalHeight(savedSizes.terminalHeight);
     }
 
-    let cancelled = false;
-    let timer;
-    const connect = async () => {
-      try {
-        const response = await fetch('http://localhost:3001/api/os');
-        const { platform: serverPlatform } = await response.json();
-        if (cancelled) return;
-        setPlatform(serverPlatform);
-        setBackendOnline(true);
-        const last = localStorage.getItem(LAST_PROJECT_KEY);
-        if (last && !projectRef.current) await openProject(last).catch(() => {});
-      } catch {
-        if (cancelled) return;
-        setBackendOnline(false);
-        timer = setTimeout(connect, 3000); // Backend sonradan başlatılırsa kendiliğinden bağlan.
-      }
-    };
-    connect();
-    return () => { cancelled = true; clearTimeout(timer); };
+    const last = localStorage.getItem(LAST_PROJECT_KEY);
+    if (last) openProject(last).catch(() => {});
   }, [openProject]);
+
+  useEffect(() => {
+    if (!connection) return;
+    let cancelled = false;
+    apiFetch('/api/os')
+      .then(response => response.json())
+      .then(({ platform: serverPlatform }) => { if (!cancelled) setPlatform(serverPlatform); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [connection]);
 
   // Açık sekmeleri proje bazında hatırla.
   useEffect(() => {
@@ -268,15 +267,16 @@ function App() {
 
   // ─── ANLIK DOSYA İZLEME (SSE) ─────────────────────────────────────────────
   useEffect(() => {
-    if (!project) return undefined;
-    const eventSource = new EventSource(`http://localhost:3001/api/fs-watch?path=${encodeURIComponent(project.path)}`);
+    if (!project || !connection) return undefined;
+    refreshExplorer();
+    const eventSource = new EventSource(streamUrl('/api/fs-watch', { path: project.path }));
     eventSource.onmessage = (event) => {
       try {
         if (JSON.parse(event.data).type === 'fs-change') refreshExplorer();
       } catch { /* geçersiz olay */ }
     };
     return () => eventSource.close();
-  }, [project, refreshExplorer]);
+  }, [project, connection, refreshExplorer]);
 
   // Explorer'da yeniden adlandırılan dosya/klasörün açık sekmelerini güncelle.
   const handleEntryRenamed = useCallback((oldPath, newPath) => {
@@ -553,7 +553,7 @@ function App() {
                     platform={platform}
                     activeRelativePath={activeFile?.relativePath || null}
                     recentProjects={recentProjects}
-                    backendOnline={backendOnline}
+                    backendOnline={Boolean(connection)}
                     onOpenFile={openProjectFile}
                     onEntryRenamed={handleEntryRenamed}
                     onEntryDeleted={handleEntryDeleted}
@@ -602,6 +602,7 @@ function App() {
                   style={{ width: aiWidth ? `${aiWidth}px` : undefined }}
                 >
                   <AIPanel
+                    connection={connection}
                     currentDirPath={project?.path || null}
                     currentDirHandle={null}
                     onFileChange={refreshExplorer}
@@ -627,6 +628,7 @@ function App() {
                 <ErrorBoundary label="Terminal hatası">
                   <Terminal
                     key={project?.path || 'no-project'}
+                    connection={connection}
                     onClose={() => { setShowTerminal(false); saveTerminalState(false); }}
                     workingDirectory={project?.path || null}
                   />

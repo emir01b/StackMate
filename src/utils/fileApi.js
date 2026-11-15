@@ -1,16 +1,16 @@
+import { apiFetch } from './backend';
 // Backend dosya sistemi API'leri: tüm proje işlemleri yerel backend üzerinden yapılır.
-const API_BASE = 'http://localhost:3001/api';
 
-const post = async (route, body, fallbackError) => {
+const post = async (route, body, fallbackError, connection) => {
   let response;
   try {
-    response = await fetch(`${API_BASE}/${route}`, {
+    response = await apiFetch(`/api/${route}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
-    });
+    }, connection);
   } catch {
-    throw new Error('Backend\'e ulaşılamadı. "npm run dev:all" ile sunucuyu başlatın.');
+    throw new Error('Yerel servise ulaşılamadı.');
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw Object.assign(new Error(data.error || fallbackError), { status: response.status, data });
@@ -18,7 +18,7 @@ const post = async (route, body, fallbackError) => {
 };
 
 /** Klasörü proje kökü olarak doğrular; gerçek (realpath) yolu döner. */
-export const apiOpenProject = (dirPath) => post('project-root', { path: dirPath }, 'Klasör açılamadı');
+export const apiOpenProject = (dirPath, connection) => post('project-root', { path: dirPath }, 'Klasör açılamadı', connection);
 
 /** İşletim sisteminin klasör seçicisini açar: { path } veya { cancelled: true }. */
 export const apiPickFolder = (startPath) => post('pick-folder', { startPath }, 'Klasör seçici açılamadı');

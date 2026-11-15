@@ -338,7 +338,7 @@ const FileExplorer = forwardRef(({
               <button type="button" className="fe-primary-btn" onClick={onPickFolder}>Klasör Aç</button>
             </>
           ) : (
-            <p className="fe-offline">Backend'e ulaşılamıyor. Terminalde <code>npm run dev:all</code> çalıştırın.</p>
+            <p className="fe-offline">StackMate yerel servisine ulaşılamıyor.</p>
           )}
           {recentProjects.length > 0 && (
             <div className="fe-recent">

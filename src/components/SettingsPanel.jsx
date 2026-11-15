@@ -1,3 +1,4 @@
+import { apiFetch } from '../utils/backend';
 import React, { useEffect, useState } from 'react';
 import { X, Save, PlugZap, Cpu, Code2, Palette, Info, Eye, EyeOff, Check, AlertCircle } from 'lucide-react';
 import './SettingsPanel.css';
@@ -60,7 +61,7 @@ const SettingsPanel = ({ settings, onSave, onClose }) => {
       setKeyDraft('');
       setClearKey(false);
       if (testAfter) {
-        const response = await fetch('http://localhost:3001/api/settings/test');
+        const response = await apiFetch('/api/settings/test');
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Bağlantı kurulamadı');
         setModels(data.models || []);

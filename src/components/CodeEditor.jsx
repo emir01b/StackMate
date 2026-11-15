@@ -3,6 +3,7 @@ import Editor from '@monaco-editor/react';
 import { Save } from 'lucide-react';
 import { apiSaveFile } from '../utils/fileApi';
 import { joinProjectPath } from '../utils/paths';
+import '../utils/monaco';
 import './CodeEditor.css';
 
 const LANGUAGE_MAP = {

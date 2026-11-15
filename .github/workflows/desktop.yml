@@ -1,0 +1,66 @@
+name: Desktop packages
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            platform: windows-x64
+            flags: --win --x64
+            executable: release/win-unpacked/StackMate.exe
+            artifact: release/StackMate-*-win-x64.exe
+          - runner: macos-15-intel
+            platform: macos-x64
+            flags: --mac --x64
+            executable: release/mac/StackMate.app/Contents/MacOS/StackMate
+            artifact: release/StackMate-*-mac-x64.dmg
+          - runner: macos-15
+            platform: macos-arm64
+            flags: --mac --arm64
+            executable: release/mac-arm64/StackMate.app/Contents/MacOS/StackMate
+            artifact: release/StackMate-*-mac-arm64.dmg
+          - runner: ubuntu-24.04
+            platform: linux-x64
+            flags: --linux --x64
+            executable: release/linux-unpacked/stackmate
+            artifact: release/StackMate-*-linux-x86_64.AppImage
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run package -- ${{ matrix.flags }}
+      - name: Prepare Chromium sandbox
+        if: runner.os == 'Linux'
+        run: |
+          sudo chown root:root release/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 release/linux-unpacked/chrome-sandbox
+      - name: Launch packaged app on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run smoke:desktop -- "${{ matrix.executable }}"
+      - name: Launch packaged app on Windows and macOS
+        if: runner.os != 'Linux'
+        run: npm run smoke:desktop -- "${{ matrix.executable }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StackMate-${{ matrix.platform }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error

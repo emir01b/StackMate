@@ -4,8 +4,9 @@ import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
 import './Terminal.css';
 import { X } from 'lucide-react';
+import { streamUrl } from '../utils/backend';
 
-const Terminal = ({ onClose, workingDirectory }) => {
+const Terminal = ({ connection, onClose, workingDirectory }) => {
   const containerRef = useRef(null);
   const xtermRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -14,6 +15,10 @@ const Terminal = ({ onClose, workingDirectory }) => {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
+    if (!connection) {
+      setConnected(false);
+      return;
+    }
     // Çift mount önleme
     if (mountedRef.current) return;
     mountedRef.current = true;
@@ -57,25 +62,27 @@ const Terminal = ({ onClose, workingDirectory }) => {
 
     // İlk fit - birkaç kez dene
     let attempts = 0;
+    let fitTimer;
+    let cwdTimer;
     const tryFit = () => {
       if (safeFit()) {
         term.focus();
         return;
       }
       if (++attempts < 10) {
-        setTimeout(tryFit, 100);
+        fitTimer = setTimeout(tryFit, 100);
       }
     };
-    setTimeout(tryFit, 50);
+    fitTimer = setTimeout(tryFit, 50);
 
     // WebSocket bağlantısı
-    const ws = new WebSocket('ws://localhost:3001');
+    const ws = new WebSocket(streamUrl('/', undefined, true));
     wsRef.current = ws;
 
     ws.onopen = () => {
       setConnected(true);
       if (workingDirectory) {
-        setTimeout(() => {
+        cwdTimer = setTimeout(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'chdir', directory: workingDirectory }));
           }
@@ -89,7 +96,6 @@ const Terminal = ({ onClose, workingDirectory }) => {
 
     ws.onerror = () => {
       term.writeln('\r\n\x1b[31m✗ Backend bağlantısı kurulamadı\x1b[0m');
-      term.writeln('\x1b[33m  node terminal-server.cjs çalıştırın\x1b[0m\r\n');
     };
 
     ws.onclose = () => {
@@ -130,13 +136,16 @@ const Terminal = ({ onClose, workingDirectory }) => {
 
     return () => {
       mountedRef.current = false;
+      clearTimeout(fitTimer);
+      clearTimeout(cwdTimer);
       window.removeEventListener('terminal-clear', onClearRequest);
       window.removeEventListener('resize', onResize);
       ro?.disconnect();
+      ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
       try { ws.close(); } catch (_) {}
       try { term.dispose(); } catch (_) {}
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [connection, workingDirectory]);
 
   return (
     <div className="terminal-container">

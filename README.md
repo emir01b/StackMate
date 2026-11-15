@@ -1,7 +1,6 @@
-# StackMate — Web IDE + AI Agent
+# StackMate — Masaüstü IDE ve AI Agent
 
-Tarayıcı tabanlı, Monaco Editor kullanan, koyu temalı bir geliştirme ortamı (IDE).  
-Yerel terminal ve **AI agent** ile birlikte çalışır, Electron paketlemesine hazırdır.
+StackMate, Monaco Editor, yerel terminal ve AI agent içeren bir Electron masaüstü uygulamasıdır.
 
 ---
 
@@ -9,10 +8,10 @@ Yerel terminal ve **AI agent** ile birlikte çalışır, Electron paketlemesine 
 
 | Bileşen | Açıklama |
 |---|---|
-| **File Explorer** | File System Access API veya backend üzerinden gerçek dosya sistemi erişimi, lazy-loading klasör açma |
+| **File Explorer** | Yerel klasör seçici ve klasör içeriğini gerektiğinde yükleyen dosya ağacı |
 | **Monaco Editor** | VS Code ile aynı editör motoru — sözdizimi renklendirme, 20+ dil |
 | **Tab Yönetimi** | Çoklu dosya sekmeleri, sekmeler arası geçiş, sekme kapatma |
-| **Kaydetme** | Ctrl+S / Cmd+S ile yerel dosyaya kayıt (FS Access veya backend API) |
+| **Kaydetme** | Ctrl+S / Cmd+S ile yerel dosyaya kayıt |
 | **Terminal** | WebSocket tabanlı gerçek terminal — komut geçmişi, ok tuşları, tab tamamlama |
 | **AI Panel (Agent)** | LM Studio entegrasyonu + agent sistemi — dosya/klasör/terminal aksiyon kartları, onay akışı |
 | **Resize** | Tüm paneller sürükleyerek boyutlandırılabilir |
@@ -21,35 +20,22 @@ Yerel terminal ve **AI agent** ile birlikte çalışır, Electron paketlemesine 
 
 ---
 
-## Kurulum
+## Geliştirme
+
+Kaynak koddan çalıştırmak için Node.js 22.12 veya üstü ve npm gerekir.
 
 ```bash
-# Projeyi klon'la veya klasöre gir
-cd StackMate
-
-# Bağımlılıkları yükle
-npm install
+npm ci
+npm run dev
 ```
 
----
+`npm run dev` Electron penceresini açar ve Vite geliştirme sunucusunu uygulama kapanana kadar çalıştırır. Electron, terminal ve dosya servislerini dinamik bir yerel portta başlatır. `npm run dev:all` aynı komutun takma adıdır.
 
-## Çalıştırma
-
-```bash
-# Hem frontend (Vite) hem terminal + dosya API + AI proxy backend'i birlikte başlatır
-npm run dev:all
-```
-
-Kalite kontrolleri: `npm run lint`, `npm test`, `npm run build`.
-
-- Uygulama (IDE): `http://localhost:5173`  
-- Terminal ve dosya backend: `http://localhost:3001`
+`npm run lint` ve `npm test` kod kontrollerini çalıştırır. Üretim arayüzünü yerel uygulama protokolüyle denemek için önce `npm run build`, ardından `npm start` çalıştırın. `npm run smoke:desktop` yerel Monaco worker'ı, terminal, kimlik doğrulama ve backend yeniden başlatma dahil gerçek Electron açılışını test eder.
 
 LM Studio için varsayılan port `1234` olarak ayarlanmıştır. Farklı bir port kullanıyorsanız **Ayarlar → AI bağlantısı** bölümünden yerel API adresini değiştirin. Uzak, OpenAI uyumlu bir API için aynı bölümde HTTPS taban adresini, model kimliğini ve API anahtarını girin. Bağlantıyı oradan test edebilirsiniz.
 
 Agent ve editör tercihleri de Ayarlar bölümünden yönetilir. API anahtarı tarayıcı depolamasına yazılmaz veya ayar yanıtında gösterilmez; backend tarafından kullanıcıya ait yerel ayar dosyasında saklanır (`%LOCALAPPDATA%\StackMate\settings.json` / `~/.config/StackMate/settings.json`). Bu yerel dosyada anahtar düz metindir; cihaz hesabınıza erişimi olan kişiler dosyayı okuyabilir.
-
-> **Not:** Terminal ve AI özellikleri için hem Vite hem de `terminal-server.cjs` aynı anda çalışmalıdır.
 
 ---
 
@@ -75,6 +61,7 @@ StackMate/
 │   └── utils/
 │       ├── storage.js           # IndexedDB + localStorage yardımcıları
 │       └── fileApi.js           # Backend dosya sistemi API yardımcıları
+├── electron/                   # Ana süreç, app:// protokolü ve preload köprüsü
 ├── terminal-server.cjs          # Node.js terminal + dosya API + AI proxy backend
 ├── package.json
 └── vite.config.js
@@ -89,10 +76,10 @@ StackMate’in AI paneli klasik bir sohbet değil, **agent odaklı** bir arayüz
 ### Mimarisi
 
 ```text
-Tarayıcı (AIPanel.jsx)
+Electron arayüzü (AIPanel.jsx)
       │ HTTP POST (streaming, SSE)
       ▼
-terminal-server.cjs (:3001/api/ai-chat)    ← CORS proxy + ek API'ler
+terminal-server.cjs (/api/ai-chat)         ← Yerel API ve model proxy
       │ HTTP POST
       ▼
 LM Studio (:1234/v1/chat/completions)      ← OpenAI uyumlu API
@@ -137,26 +124,11 @@ Bu sayede:
 - Model arka planda zincir komut çalıştırmaz.
 - Kullanıcı her adımı, özellikle hataları, küçük terminal kutuları içinde görebilir.
 
-### Dosya Sistemi Modları
+### Proje Dosyaları
 
-StackMate iki farklı dosya çalışma modu destekler:
+**File → Klasör Aç** sistemin yerel klasör seçicisini açar. Seçici hata verirse tam klasör yolunu elle girebilirsiniz. Backend, proje dosyası ve agent işlemlerini seçilen proje köküyle sınırlar.
 
-1. **File System Access API modu (doğrudan disk)**  
-   - `showDirectoryPicker` ile klasör açıldığında kullanılır.  
-   - AI’nın dosya işlemleri, `FileSystemDirectoryHandle` üzerinden direkt diske yazılır/silinir.
-
-2. **Backend yolu modu (`currentDirPath`)**  
-   - Proje klasör yolu backend’e verilmişse kullanılır.  
-   - Dosya işlemleri `/api/save-file`, `/api/delete-file`, `/api/mkdir` endpoint’leri üzerinden yapılır.
-
-AI paneli aksiyon başına otomatik seçim yapar:
-
-- Yol biliniyorsa → backend API  
-- Yol bilinmiyorsa ama handle varsa → File System Access API
-
-AI dosya ve klasör eylemleri uygulanmadan önce karttaki onay düğmesine basılmalıdır. Var olan bir dosyanın üzerine yazmadan önce ayrıca onay istenir. Terminal komutları için seçilen proje klasörünün tam yolunu kullanıcı girer; backend işlemleri yalnızca bu dizinde kabul eder. Yol girilmezse tarayıcı dosya erişimiyle düzenleme kullanılabilir, terminal agent komutları kullanılamaz.
-
-Gömülü tarayıcıda yerel klasör seçici kullanılamazsa **File → Klasör Aç** bir yol giriş penceresi açar. Tam yol girildiğinde dosya ağacı backend üzerinden yüklenir.
+AI dosya ve klasör eylemleri uygulanmadan önce karttaki onay düğmesine basılmalıdır. Var olan bir dosyanın üzerine yazmadan önce ayrıca onay istenir.
 
 Uyumlu LM Studio modelleri yapılandırılmış araç çağrıları kullanır; diğer modeller için etiketli komut biçimi desteklenir. Terminal kartındaki uzun süren komutlar arka planda bırakılabilir veya durdurulabilir. Sohbeti temizlemek çalışan agent süreçlerine durdurma isteği gönderir.
 
@@ -168,7 +140,7 @@ Uyumlu LM Studio modelleri yapılandırılmış araç çağrıları kullanır; d
 2. Uygun bir model indirin (ör. `qwen`, `mistral`, `llama`, `glm` vb.).  
 3. **Developer** sekmesinden OpenAI uyumlu sunucuyu başlatın.  
 4. Sunucunun `http://127.0.0.1:1234` adresinde çalıştığından emin olun.  
-5. `npm run dev:all` ile StackMate’i başlatın — AI paneli otomatik bağlanır.
+5. StackMate’i başlatın. AI paneli yerel sunucuya bağlanır.
 
 AI paneli:
 
@@ -209,74 +181,34 @@ AI paneli:
 
 ---
 
-## State Kalıcılığı
+## Oturum Kalıcılığı
 
-Sayfa yenilendiğinde otomatik geri yüklenenler:
-
-- ✅ Son açılan klasör (IndexedDB — `FileSystemDirectoryHandle`)  
-- ✅ Açık sekmeler ve dosyalar (IndexedDB — `FileSystemFileHandle`)  
-- ✅ Aktif sekme  
-- ✅ Terminal açık/kapalı durumu (localStorage)  
-- ✅ Panel boyutları (localStorage)  
-
-> Tarayıcı, dosya erişimi için izin isteyebilir. İzin verilmezse proje klasörünü yeniden seçmeniz gerekir.
+Uygulama açıldığında son proje yolu, açık dosya sekmeleri ve aktif sekme geri yüklenir. Panel boyutları ve terminalin görünürlüğü de saklanır.
 
 ---
 
-## Platform ve Tarayıcı Desteği
+## Masaüstü Mimarisi
 
-**Masaüstü OS**
+Ana süreç arayüzü `app://stackmate` üzerinden sunar. Dosya, terminal ve AI istekleri yalnızca yerel makinede dinleyen bir alt sürece gider. Arayüz her backend başlangıcında üretilen bağlantı bilgilerini preload köprüsünden alır. Monaco ve worker dosyaları uygulama paketinden yüklenir.
 
-| Platform | Frontend | Terminal | Notlar |
-|---|---|---|---|
-| **macOS** | ✅ | ✅ | `/bin/zsh` varsayılan shell |
-| **Linux** | ✅ | ✅ | `/bin/bash` varsayılan shell, `$SHELL` öncelikli |
-| **Windows** | ✅ | ✅ | `cmd.exe` varsayılan shell (`COMSPEC`) |
-
-**Tarayıcı Özellikleri**
-
-| Özellik | Chrome/Edge | Firefox | Safari |
-|---|---|---|---|
-| Temel IDE | ✅ | ✅ | ✅ |
-| Dosya Sistemi (File System Access API) | ✅ | ❌ | ❌ |
-| Terminal | ✅ | ✅ | ✅ |
-
-> **Önerilen:** Chrome veya Edge — FS Access API ve en sorunsuz IDE deneyimi için.
+Terminal, WebSocket üzerinden XTerm.js ile haberleşir. Komut geçmişi, satır düzenleme ve dosya adı tamamlama korunur. Windows'ta kabuk `COMSPEC` veya `cmd.exe`, macOS ve Linux'ta `SHELL` veya platformun varsayılan kabuğudur.
 
 ---
 
-## Terminal Mimarisi (Detay)
+## Dağıtım Paketi Oluşturma
 
-```text
-Tarayıcı (XTerm.js)
-      │ WebSocket (ws://localhost:3001)
-      ▼
-Node.js (terminal-server.cjs)
-      │
-      ├── Readline emülatörü (↑↓ history, ←→ cursor, Tab completion)
-      ├── Dahili komutlar: cd, clear, vs.
-      └── spawn(SHELL, ['-c', cmd]) → tüm diğer komutlar
-```
-
-> `node-pty` kuruluysa tam PTY moduna geçer (interaktif TUI’ler daha iyi çalışır).  
-> Yoksa, custom readline emülatörü devreye girer.
-
----
-
-## Electron’a Dönüştürme (Özet)
-
-Projeyi masaüstü uygulaması olarak paketlemek için temel adımlar:
+Paketleme komutunu ilgili işletim sisteminde çalıştırın. Kurulum dosyaları `release/` altında oluşur.
 
 ```bash
-npm install --save-dev electron electron-builder
-
-# electron/main.js oluştur
-# package.json içine:
-#   "main": "electron/main.js"
-#   "scripts": { "electron:build": "electron-builder" }
+npm run package -- --win --x64       # Windows x64 NSIS (.exe)
+npm run package -- --mac --x64       # macOS Intel (.dmg)
+npm run package -- --mac --arm64     # macOS Apple Silicon (.dmg)
+npm run package -- --linux --x64     # Linux x64 (.AppImage)
 ```
 
-Detaylı Electron entegrasyonu bu repoda henüz tam şablonlanmadı, ancak yapı buna göre hazırlanmıştır.
+Tek başına `npm run package` çalıştırmak mevcut işletim sisteminin hedeflerini üretir. Uygulama dizinini kurulum dosyası oluşturmadan paketlemek için `npm run package:dir` kullanın.
+
+GitHub Actions her hedefi kendi işletim sisteminde derler ve paketlenmiş uygulamayı açılış testinden geçirir. İmzalama anahtarları yapılandırılana kadar üretilen paketler imzasızdır. Kurulu StackMate kendi Electron çalışma zamanını ve yerel backend'ini içerir.
 
 ---
 

@@ -1,3 +1,4 @@
+import { apiFetch } from '../utils/backend';
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Bot, Loader2, Trash2, Eraser, Copy, Check, X, Plus, ArrowUp, Square, Undo2,
@@ -13,9 +14,9 @@ import { replaceUniqueText, supportsWhitespaceMatch } from '../utils/editMatchin
 import { normalizeAgentPath, resolveAgentPath } from '../utils/paths.js';
 
 // ─── Sabitler ────────────────────────────────────────────────────────────────
-const LM_STUDIO_URL = 'http://localhost:3001/api/ai-chat';
-const LM_STUDIO_MODELS_URL = 'http://localhost:3001/api/ai-models';
-const OS_URL = 'http://localhost:3001/api/os';
+const LM_STUDIO_URL = '/api/ai-chat';
+const LM_STUDIO_MODELS_URL = '/api/ai-models';
+const OS_URL = '/api/os';
 
 const CONNECTION_POLL_MS = 10_000;
 // Model bağlam uzunluğu bilinmiyorsa (LM Studio dışı sunucu) varsayılan.
@@ -88,7 +89,7 @@ const normalizeTerminalCommand = (cmd) =>
   typeof cmd === 'string' ? cmd.replace(/^\s*cmd\s*:\s*/i, '').trim() : cmd;
 
 const ensureBackendRoot = async (dirPath) => {
-  const response = await fetch('http://localhost:3001/api/project-root', {
+  const response = await apiFetch('/api/project-root', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: dirPath }),
   });
   if (!response.ok) throw new Error('Proje klasörü backend üzerinde doğrulanamadı');
@@ -391,7 +392,7 @@ const CodeBlock = ({ language, code, incomplete, currentDirPath, currentDirHandl
     setSaveStatus('saving');
     try {
       if (currentDirPath) {
-        const res = await fetch('http://localhost:3001/api/save-file', {
+        const res = await apiFetch('/api/save-file', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: resolveAgentPath(currentDirPath, fileName.trim()), content: code }),
@@ -758,7 +759,7 @@ const ReviewBar = ({ files, busy, onKeep, onUndo, onOpen }) => {
 };
 
 // ─── Ana Bileşen ─────────────────────────────────────────────────────────────
-const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange, onOpenFile }) => {
+const AIPanel = ({ connection, currentDirPath, currentDirHandle, onFileChange, onOpenFile }) => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -822,8 +823,9 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange, onOpenFile })
   const fileBudgetChars = useCallback(() => Math.max(2500, Math.floor((contextLengthRef.current * 0.7 - 2600) * charsPerTokenRef.current * 0.6)), []);
 
   useEffect(() => {
+    if (!connection) return;
     const refresh = () => {
-      fetch('http://localhost:3001/api/settings')
+      apiFetch('/api/settings')
         .then(response => response.ok ? response.json() : null)
         .then(data => { if (data?.ai) setAgentSettings(data.ai); })
         .catch(() => {});
@@ -832,13 +834,13 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange, onOpenFile })
     refresh();
     window.addEventListener('stackmate-settings-changed', refresh);
     return () => window.removeEventListener('stackmate-settings-changed', refresh);
-  }, []);
+  }, [connection]);
 
   useEffect(() => {
-    if (!currentDirPath) return;
+    if (!connection || !currentDirPath) return;
     let cancelled = false;
     ensureBackendRoot(currentDirPath)
-      .then(() => fetch('http://localhost:3001/api/agent-pending'))
+      .then(() => apiFetch('/api/agent-pending'))
       .then(response => response.ok ? response.json() : { pending: [] })
       .then(({ pending }) => {
         if (cancelled) return;
@@ -866,13 +868,17 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange, onOpenFile })
       })
       .catch(error => console.warn('Bekleyen değişiklikler yüklenemedi:', error));
     return () => { cancelled = true; };
-  }, [currentDirPath]);
+  }, [connection, currentDirPath]);
 
   // ─── Bağlantı kontrolü ──────────────────────────────────────────────────────
   useEffect(() => {
+    if (!connection) {
+      setIsConnected(false);
+      return;
+    }
     const checkConnection = async () => {
       try {
-        const res = await fetch(LM_STUDIO_MODELS_URL);
+        const res = await apiFetch(LM_STUDIO_MODELS_URL);
         if (res.ok) {
           const data = await res.json();
           // Gömme (embedding) modelleri sohbet edemez; listede gösterilmez.
@@ -895,7 +901,7 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange, onOpenFile })
     checkConnection();
     const interval = setInterval(checkConnection, CONNECTION_POLL_MS);
     return () => clearInterval(interval);
-  }, [settingsVersion]);
+  }, [connection, settingsVersion]);
 
   // ─── Otomatik scroll ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -995,7 +1001,7 @@ const AIPanel = ({ currentDirPath, currentDirHandle, onFileChange, onOpenFile })
       // OS bilgisi
       let osLabel = '';
       try {
-        const osRes = await fetch(OS_URL);
+        const osRes = await apiFetch(OS_URL);
         if (osRes.ok) {
           const { label } = await osRes.json();
           osLabel = label || '';
@@ -1097,7 +1103,7 @@ KRİTİK KURALLAR:
       // İstek bağlamı aşmasın: yanıt sınırı kalan alana göre ayarlanır.
       const maxTokens = Math.max(256, Math.min(agentSettingsRef.current.maxTokens, contextLength - promptEstimate - 64));
 
-      const response = await fetch(LM_STUDIO_URL, {
+      const response = await apiFetch(LM_STUDIO_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1295,7 +1301,7 @@ KRİTİK KURALLAR:
 
   const readProjectFile = useCallback(async (actionPath) => {
     if (currentDirPath) {
-      const res = await fetch('http://localhost:3001/api/read-file', {
+      const res = await apiFetch('/api/read-file', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: resolveAgentPath(currentDirPath, actionPath) }),
       });
@@ -1319,7 +1325,7 @@ KRİTİK KURALLAR:
   const listProjectDir = useCallback(async (actionPath) => {
     const relative = toProjectPath(actionPath || '.');
     if (currentDirPath) {
-      const res = await fetch('http://localhost:3001/api/list-dir', {
+      const res = await apiFetch('/api/list-dir', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: resolveAgentPath(currentDirPath, relative || '.') }),
       });
@@ -1411,7 +1417,7 @@ KRİTİK KURALLAR:
         case 'file_action': {
           if (previousState?.status === 'review') {
             if (previousState.backend) {
-              const res = await fetch('http://localhost:3001/api/agent-commit', {
+              const res = await apiFetch('/api/agent-commit', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: previousState.token }),
               });
               if (!res.ok) throw new Error((await res.json()).error || 'Onaylanamadı');
@@ -1423,7 +1429,7 @@ KRİTİK KURALLAR:
           let token;
           let created;
           if (useBackend) {
-            const res = await fetch('http://localhost:3001/api/agent-stage', {
+            const res = await apiFetch('/api/agent-stage', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ path: resolveAgentPath(currentDirPath, action.path), type: 'file', content: action.content }),
             });
@@ -1449,7 +1455,7 @@ KRİTİK KURALLAR:
         }
         case 'delete_action': {
           if (useBackend) {
-            const res = await fetch('http://localhost:3001/api/delete-file', {
+            const res = await apiFetch('/api/delete-file', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ path: resolveAgentPath(currentDirPath, action.path) }),
@@ -1465,7 +1471,7 @@ KRİTİK KURALLAR:
         }
         case 'mkdir_action': {
           if (useBackend) {
-            const res = await fetch('http://localhost:3001/api/mkdir', {
+            const res = await apiFetch('/api/mkdir', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ path: resolveAgentPath(currentDirPath, action.path) }),
@@ -1482,7 +1488,7 @@ KRİTİK KURALLAR:
         case 'edit_action': {
           if (previousState?.status === 'review') {
             if (previousState.backend) {
-              const res = await fetch('http://localhost:3001/api/agent-commit', {
+              const res = await apiFetch('/api/agent-commit', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: previousState.token }),
               });
               if (!res.ok) throw new Error((await res.json()).error || 'Onaylanamadı');
@@ -1493,7 +1499,7 @@ KRİTİK KURALLAR:
           let token;
           let after;
           if (useBackend) {
-            const res = await fetch('http://localhost:3001/api/agent-stage', {
+            const res = await apiFetch('/api/agent-stage', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ path: resolveAgentPath(currentDirPath, action.path), type: 'edit', oldText: action.oldText, newText: action.newText }),
             });
@@ -1519,7 +1525,7 @@ KRİTİK KURALLAR:
         }
         case 'web_action': {
           if (!useBackend) throw new Error('Web araştırması özelliği sadece Masaüstü IDE (Backend) modunda çalışır.');
-          const res = await fetch('http://localhost:3001/api/search-web', {
+          const res = await apiFetch('/api/search-web', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query: action.query }),
@@ -1535,7 +1541,7 @@ KRİTİK KURALLAR:
           // Terminal kilidi al — paralel çalışmayı engelle
           terminalInProgressRef.current = true;
 
-          const startRes = await fetch('http://localhost:3001/api/agent-run', {
+          const startRes = await apiFetch('/api/agent-run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ command: normalizeTerminalCommand(action.command), cwd: currentDirPath || undefined }),
@@ -1554,7 +1560,7 @@ KRİTİK KURALLAR:
           const pollStatus = async () => {
             if (activeProcIdsRef.current.get(actionId) !== procId) return;
             try {
-              const statusRes = await fetch('http://localhost:3001/api/agent-status', {
+              const statusRes = await apiFetch('/api/agent-status', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ procId }),
@@ -1662,7 +1668,7 @@ KRİTİK KURALLAR:
       setActionStates(prev => ({ ...prev, [actionId]: { ...previousState, status: 'running' } }));
       try {
         if (previousState.backend) {
-          const res = await fetch('http://localhost:3001/api/agent-revert', {
+          const res = await apiFetch('/api/agent-revert', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: previousState.token }),
           });
           const data = await res.json();
@@ -1802,7 +1808,7 @@ KRİTİK KURALLAR:
   const handleTerminalStop = useCallback(async (actionId, procId) => {
     if (!procId) return;
     userStoppedProcsRef.current.add(procId);
-    const response = await fetch('http://localhost:3001/api/agent-kill', {
+    const response = await apiFetch('/api/agent-kill', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ procId }),
     });
     if (!response.ok) {
@@ -1962,7 +1968,7 @@ KRİTİK KURALLAR:
     if (pendingChanges.length) await keepChanges(pendingChanges);
     for (const state of Object.values(actionStatesRef.current)) {
       if (state.procId && (state.status === 'running' || state.serverRunning)) {
-        fetch('http://localhost:3001/api/agent-kill', {
+        apiFetch('/api/agent-kill', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ procId: state.procId }),
         }).catch(console.error);
       }
@@ -2137,7 +2143,7 @@ KRİTİK KURALLAR:
                 const model = e.target.value;
                 setActiveModel(model);
                 try {
-                  const response = await fetch('http://localhost:3001/api/settings', {
+                  const response = await apiFetch('/api/settings', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ai: { model } }),
                   });
                   if (!response.ok) throw new Error('Model seçimi kaydedilemedi');
