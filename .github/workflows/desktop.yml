@@ -48,6 +48,9 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run package -- ${{ matrix.flags }}
+      - name: Verify macOS code signature
+        if: runner.os == 'macOS'
+        run: codesign --verify --deep --strict --verbose=2 "$(dirname "$(dirname "$(dirname "${{ matrix.executable }}")")")"
       - name: Prepare Chromium sandbox
         if: runner.os == 'Linux'
         run: |
